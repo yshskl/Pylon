@@ -321,6 +321,25 @@ export class AgentServer {
         return text(`Renamed to "${newName}" — ${totalEdits} edit(s) across ${entries.length} file(s):\n${fileList.join('\n')}`);
       }
 
+      case 'run_command': {
+        const command = args.command as string;
+        const commandArgs = args.args as unknown[] | undefined;
+        try {
+          const result = commandArgs
+            ? await vscode.commands.executeCommand(command, ...commandArgs)
+            : await vscode.commands.executeCommand(command);
+          if (result === undefined || result === null) {
+            return text(`Command "${command}" executed.`);
+          }
+          if (typeof result === 'string') {
+            return text(result);
+          }
+          return text(JSON.stringify(result, null, 2));
+        } catch (e) {
+          return text(`Command "${command}" failed: ${e}`);
+        }
+      }
+
       default:
         throw new Error(`Unknown tool: ${name}`);
     }

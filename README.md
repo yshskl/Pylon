@@ -82,6 +82,7 @@ The extension auto-starts when VS Code opens. The status bar shows the current r
 | `get_document_symbols` | Get the symbol outline of a file (functions, classes, methods, variables) without reading it. Massive token savings for codebase exploration. |
 | `get_references` | Find all references/usages of a symbol across the workspace. Critical for understanding blast radius before refactoring. |
 | `rename_symbol` | LSP-powered rename that updates all references, imports, and type annotations across the workspace. |
+| `run_command` | Execute any VS Code command by ID. Universal escape hatch — format documents, organize imports, toggle settings, and anything else VS Code can do. |
 
 All tools accept an optional `session_id` parameter to target a specific VS Code window.
 

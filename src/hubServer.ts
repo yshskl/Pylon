@@ -218,6 +218,31 @@ const HUB_TOOLS = [
       required: ['uri', 'line', 'character', 'new_name'],
     },
   },
+  {
+    name: 'run_command',
+    description:
+      'Execute any VS Code command by ID. Universal escape hatch — anything VS Code can do, the agent can trigger. ' +
+      'Common examples: "editor.action.organizeImports" (fix imports), "editor.action.formatDocument" (format file), ' +
+      '"workbench.action.closeActiveEditor" (close tab), "workbench.action.terminal.new" (new terminal). ' +
+      'Use "workbench.action.showCommands" as a reference — any command from the Command Palette works here. ' +
+      SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        command: {
+          type: 'string',
+          description: 'VS Code command ID (e.g. "editor.action.formatDocument", "workbench.action.files.save")',
+        },
+        args: {
+          type: 'array',
+          description: 'Optional arguments to pass to the command',
+          items: {},
+        },
+        ...SESSION_ID_PROP,
+      },
+      required: ['command'],
+    },
+  },
 ];
 
 export class HubServer {
