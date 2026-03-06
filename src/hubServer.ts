@@ -144,6 +144,80 @@ const HUB_TOOLS = [
       },
     },
   },
+  {
+    name: 'get_document_symbols',
+    description:
+      'Get the symbol outline of a file (functions, classes, methods, variables, exports) without reading the entire file. ' +
+      'Massive token savings when exploring codebases. Returns a hierarchical list of symbols with name, kind, and line range. ' +
+      SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        uri: {
+          type: 'string',
+          description: 'File path or URI to get symbols for',
+        },
+        ...SESSION_ID_PROP,
+      },
+      required: ['uri'],
+    },
+  },
+  {
+    name: 'get_references',
+    description:
+      'Find all references (usages) of a symbol across the entire workspace. ' +
+      'Critical for safe refactoring — understand blast radius before making changes. ' +
+      'Returns a list of file locations where the symbol is used. ' + SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        uri: {
+          type: 'string',
+          description: 'File path or URI containing the symbol',
+        },
+        line: {
+          type: 'number',
+          description: 'Line number (0-based) of the symbol',
+        },
+        character: {
+          type: 'number',
+          description: 'Column number (0-based) of the symbol',
+        },
+        ...SESSION_ID_PROP,
+      },
+      required: ['uri', 'line', 'character'],
+    },
+  },
+  {
+    name: 'rename_symbol',
+    description:
+      'Rename a symbol across the entire workspace using VS Code LSP. ' +
+      'Updates all references including imports, re-exports, and type annotations. ' +
+      'Use get_references first to understand impact, then rename. ' + SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        uri: {
+          type: 'string',
+          description: 'File path or URI containing the symbol to rename',
+        },
+        line: {
+          type: 'number',
+          description: 'Line number (0-based) of the symbol',
+        },
+        character: {
+          type: 'number',
+          description: 'Column number (0-based) of the symbol',
+        },
+        new_name: {
+          type: 'string',
+          description: 'New name for the symbol',
+        },
+        ...SESSION_ID_PROP,
+      },
+      required: ['uri', 'line', 'character', 'new_name'],
+    },
+  },
 ];
 
 export class HubServer {
@@ -300,7 +374,7 @@ export class HubServer {
             result: {
               protocolVersion: '2024-11-05',
               capabilities: { tools: {} },
-              serverInfo: { name: 'pylon', version: '0.2.0' },
+              serverInfo: { name: 'pylon', version: '0.2.0' }, // keep in sync with package.json
             },
           };
 

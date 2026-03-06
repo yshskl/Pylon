@@ -31,7 +31,7 @@ AI Agent (Claude Code / Gemini / any MCP client)
 npm run compile
 npm install -g @vscode/vsce
 vsce package
-code --install-extension pylon-0.1.0.vsix
+code --install-extension pylon-0.2.0.vsix
 ```
 
 ### 2. Add MCP config to your AI agent
@@ -79,6 +79,9 @@ The extension auto-starts when VS Code opens. The status bar shows the current r
 | Tool | Description |
 |------|-------------|
 | `get_diagnostics` | Get VS Code diagnostics (TypeScript errors, ESLint warnings, etc.) from all open files or a specific file. Filter by file path or severity level. |
+| `get_document_symbols` | Get the symbol outline of a file (functions, classes, methods, variables) without reading it. Massive token savings for codebase exploration. |
+| `get_references` | Find all references/usages of a symbol across the workspace. Critical for understanding blast radius before refactoring. |
+| `rename_symbol` | LSP-powered rename that updates all references, imports, and type annotations across the workspace. |
 
 All tools accept an optional `session_id` parameter to target a specific VS Code window.
 

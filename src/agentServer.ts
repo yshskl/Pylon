@@ -210,6 +210,117 @@ export class AgentServer {
         return text(`${totalCount} diagnostic(s):\n\n${lines.join('\n')}`);
       }
 
+      case 'get_document_symbols': {
+        const uri = args.uri as string;
+        const fileUri = uri.includes('://') ? vscode.Uri.parse(uri) : vscode.Uri.file(uri);
+        const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+          'vscode.executeDocumentSymbolProvider',
+          fileUri
+        );
+        if (!symbols || symbols.length === 0) {
+          return text(`No symbols found in ${uri}. The file may not have a language server active.`);
+        }
+
+        const symbolKindName = (kind: vscode.SymbolKind): string => vscode.SymbolKind[kind] || 'Unknown';
+
+        const lines: string[] = [];
+        const walk = (syms: vscode.DocumentSymbol[], indent: number) => {
+          for (const s of syms) {
+            const prefix = '  '.repeat(indent);
+            const range = `${s.range.start.line + 1}–${s.range.end.line + 1}`;
+            lines.push(`${prefix}${symbolKindName(s.kind)} ${s.name} [${range}]`);
+            if (s.children && s.children.length > 0) {
+              walk(s.children, indent + 1);
+            }
+          }
+        };
+        walk(symbols, 0);
+        return text(`${lines.length} symbol(s) in ${vscode.workspace.asRelativePath(fileUri)}:\n\n${lines.join('\n')}`);
+      }
+
+      case 'get_references': {
+        const uri = args.uri as string;
+        const line = args.line as number;
+        const character = args.character as number;
+        if (!Number.isInteger(line) || !Number.isInteger(character) || line < 0 || character < 0) {
+          return text('Error: line and character must be non-negative integers.');
+        }
+        const fileUri = uri.includes('://') ? vscode.Uri.parse(uri) : vscode.Uri.file(uri);
+        const position = new vscode.Position(line, character);
+        const locations = await vscode.commands.executeCommand<vscode.Location[]>(
+          'vscode.executeReferenceProvider',
+          fileUri,
+          position
+        );
+        if (!locations || locations.length === 0) {
+          return text(`No references found at ${uri}:${line}:${character}.`);
+        }
+        const MAX_REFS = 500;
+        const lines: string[] = locations.map((loc) => {
+          const relPath = vscode.workspace.asRelativePath(loc.uri);
+          const l = loc.range.start.line + 1;
+          const c = loc.range.start.character + 1;
+          return `${relPath}:${l}:${c}`;
+        });
+        const output = lines.slice(0, MAX_REFS).join('\n');
+        const suffix = lines.length > MAX_REFS ? `\n... and ${lines.length - MAX_REFS} more.` : '';
+        return text(`${locations.length} reference(s):\n\n${output}${suffix}`);
+      }
+
+      case 'rename_symbol': {
+        const uri = args.uri as string;
+        const line = args.line as number;
+        const character = args.character as number;
+        if (!Number.isInteger(line) || !Number.isInteger(character) || line < 0 || character < 0) {
+          return text('Error: line and character must be non-negative integers.');
+        }
+        const newName = args.new_name as string;
+        const fileUri = uri.includes('://') ? vscode.Uri.parse(uri) : vscode.Uri.file(uri);
+        const position = new vscode.Position(line, character);
+
+        // Step 1: Check if rename is possible via prepareRename
+        let prepareResult: unknown;
+        try {
+          prepareResult = await vscode.commands.executeCommand(
+            'vscode.prepareRename',
+            fileUri,
+            position
+          );
+        } catch (prepErr) {
+          return text(`Cannot rename at ${uri}:${line}:${character} — ${prepErr}`);
+        }
+        if (!prepareResult) {
+          return text(`Cannot rename symbol at ${uri}:${line}:${character}. The element at this position is not renameable.`);
+        }
+
+        // Step 2: Execute the rename
+        const edit = await vscode.commands.executeCommand<vscode.WorkspaceEdit>(
+          'vscode.executeDocumentRenameProvider',
+          fileUri,
+          position,
+          newName
+        );
+        if (!edit) {
+          return text(`Cannot rename symbol at ${uri}:${line}:${character}. No rename provider available.`);
+        }
+        const entries = edit.entries();
+        if (entries.length === 0) {
+          return text('Rename produced no changes.');
+        }
+        const applied = await vscode.workspace.applyEdit(edit);
+        if (!applied) {
+          return text('Failed to apply rename edit.');
+        }
+        const totalEdits = entries.reduce((sum, [, edits]) => sum + edits.length, 0);
+        const fileList = entries.map(([u]) => vscode.workspace.asRelativePath(u));
+        // Save only the affected files so the rename is persisted to disk
+        for (const [affectedUri] of entries) {
+          const doc = await vscode.workspace.openTextDocument(affectedUri);
+          if (doc.isDirty) { await doc.save(); }
+        }
+        return text(`Renamed to "${newName}" — ${totalEdits} edit(s) across ${entries.length} file(s):\n${fileList.join('\n')}`);
+      }
+
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
