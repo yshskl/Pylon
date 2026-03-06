@@ -1,0 +1,65 @@
+{
+  "name": "pylon",
+  "displayName": "Pylon",
+  "description": "VS Code MCP server for AI coding agents — terminals, diagnostics, multi-window, zero dependencies",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/toalba/Pylon"
+  },
+  "engines": { "vscode": "^1.93.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "pylon.startMCP",
+        "title": "Pylon: Start MCP Server"
+      },
+      {
+        "command": "pylon.stopMCP",
+        "title": "Pylon: Stop MCP Server"
+      },
+      {
+        "command": "pylon.showStatus",
+        "title": "Pylon: Show Status"
+      },
+      {
+        "command": "pylon.diagnose",
+        "title": "Pylon: Diagnose Shell Integration"
+      }
+    ],
+    "configuration": {
+      "title": "Pylon",
+      "properties": {
+        "pylon.port": {
+          "type": "number",
+          "default": 27681,
+          "description": "Hub port for the MCP server (must match your AI agent's MCP config URL)"
+        },
+        "pylon.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-start MCP server on VS Code launch"
+        },
+        "pylon.outputBufferLines": {
+          "type": "number",
+          "default": 2000,
+          "description": "Max lines to buffer from terminal output"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.93.0",
+    "typescript": "^5.0.0"
+  }
+}

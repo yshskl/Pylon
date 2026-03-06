@@ -1,0 +1,388 @@
+import * as http from 'http';
+import { AgentServer, ToolResult } from './agentServer';
+import { httpPost } from './sessionManager';
+
+interface MCPRequest {
+  jsonrpc: '2.0';
+  id: number | string | null;
+  method: string;
+  params?: Record<string, unknown>;
+}
+
+interface MCPResponse {
+  jsonrpc: '2.0';
+  id: number | string | null;
+  result?: unknown;
+  error?: { code: number; message: string };
+}
+
+interface SessionEntry {
+  agentUrl: string;
+  lastSeen: number;
+}
+
+const STALE_MS = 15000;
+
+const SESSION_ID_PROP = {
+  session_id: {
+    type: 'string',
+    description:
+      'Target session ID (workspace name). Use terminal_list_sessions to discover available sessions. Omit to target the hub window.',
+  },
+};
+
+const SESSION_ID_NOTE =
+  'Always include session_id (obtained from terminal_list_sessions) to target the correct VSCode window.';
+
+const HUB_TOOLS = [
+  {
+    name: 'terminal_list_sessions',
+    description:
+      'CALL THIS FIRST before using any other terminal tools. ' +
+      'Lists all connected VSCode windows with their session IDs (= workspace folder name). ' +
+      'Identify your session by matching the workspace folder name visible in your current context, ' +
+      'then remember that session_id and pass it to all subsequent terminal tool calls.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'terminal_list',
+    description:
+      'List open VS Code terminals. Without session_id lists terminals across ALL sessions tagged by session name. ' +
+      'With session_id lists terminals in that session only. ' + SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: { ...SESSION_ID_PROP },
+    },
+  },
+  {
+    name: 'terminal_run',
+    description:
+      'Execute a shell command in a VS Code terminal. Captures and returns stdout/stderr. Requires shell integration. ' +
+      'Use terminal_name to target a specific terminal by name. ' + SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'Shell command to execute' },
+        terminal_name: {
+          type: 'string',
+          description: 'Name of target terminal (optional, uses active terminal if omitted)',
+        },
+        timeout_ms: { type: 'number', description: 'Timeout in milliseconds (default: 30000)' },
+        ...SESSION_ID_PROP,
+      },
+      required: ['command'],
+    },
+  },
+  {
+    name: 'terminal_send_text',
+    description:
+      'Send text/input to a terminal WITHOUT capturing output. ' +
+      'Use this to interact with running processes (e.g. answer prompts, send Ctrl+C via \\x03). ' +
+      SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', description: 'Text to send. Use \\x03 for Ctrl+C, \\x04 for Ctrl+D.' },
+        terminal_name: { type: 'string', description: 'Name of target terminal (optional)' },
+        add_newline: { type: 'boolean', description: 'Whether to append newline (default: true)' },
+        ...SESSION_ID_PROP,
+      },
+      required: ['text'],
+    },
+  },
+  {
+    name: 'terminal_read_output',
+    description:
+      'Read buffered output from a terminal. ' +
+      'Captures ALL output including from long-running processes (dev servers, watchers, etc). ' +
+      'Buffer is populated from the moment the extension started. ' + SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        terminal_name: {
+          type: 'string',
+          description: 'Name of terminal to read (optional, uses active terminal if omitted)',
+        },
+        lines: {
+          type: 'number',
+          description: 'Number of last lines to return (optional, returns all buffered lines if omitted)',
+        },
+        ...SESSION_ID_PROP,
+      },
+    },
+  },
+  {
+    name: 'terminal_clear_buffer',
+    description: 'Clear the output buffer for a terminal (start fresh). ' + SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        terminal_name: { type: 'string', description: 'Name of terminal (optional, uses active terminal)' },
+        ...SESSION_ID_PROP,
+      },
+    },
+  },
+  {
+    name: 'get_diagnostics',
+    description:
+      'Get VS Code diagnostics (errors, warnings, hints) from all open files or a specific file. ' +
+      'Returns TypeScript errors, ESLint warnings, and any other diagnostics from installed language extensions. ' +
+      'Useful after editing files to check for problems without running a build. ' + SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        uri: {
+          type: 'string',
+          description: 'File path or URI to get diagnostics for (optional, returns all diagnostics if omitted)',
+        },
+        severity: {
+          type: 'string',
+          enum: ['error', 'warning', 'information', 'hint'],
+          description: 'Filter by severity level (optional, returns all severities if omitted)',
+        },
+        ...SESSION_ID_PROP,
+      },
+    },
+  },
+];
+
+export class HubServer {
+  private server: http.Server | null = null;
+  private ownAgent: AgentServer;
+  private ownSessionId: string;
+  private sessions = new Map<string, SessionEntry>();
+  readonly port: number;
+
+  constructor(ownAgent: AgentServer, ownSessionId: string, port = 27681) {
+    this.ownAgent = ownAgent;
+    this.ownSessionId = ownSessionId;
+    this.port = port;
+    this.sessions.set(ownSessionId, {
+      agentUrl: `http://127.0.0.1:${ownAgent.port}`,
+      lastSeen: Date.now(),
+    });
+  }
+
+  start(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const server = http.createServer(this.createHandler());
+      server.on('error', reject);
+      server.listen(this.port, '127.0.0.1', () => {
+        this.server = server;
+        resolve();
+      });
+    });
+  }
+
+  stop(): Promise<void> {
+    return new Promise((resolve) => {
+      if (!this.server) { resolve(); return; }
+      this.server.close(() => { this.server = null; resolve(); });
+    });
+  }
+
+  get isRunning(): boolean {
+    return this.server !== null && this.server.listening;
+  }
+
+  registerSession(sessionId: string, agentUrl: string): void {
+    this.sessions.set(sessionId, { agentUrl, lastSeen: Date.now() });
+  }
+
+  heartbeat(sessionId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+    session.lastSeen = Date.now();
+    this.pruneStaleSessions();
+    return true;
+  }
+
+  listSessions(): Array<{ sessionId: string; agentUrl: string; isHub: boolean }> {
+    this.pruneStaleSessions();
+    return Array.from(this.sessions.entries()).map(([id, s]) => ({
+      sessionId: id,
+      agentUrl: s.agentUrl,
+      isHub: id === this.ownSessionId,
+    }));
+  }
+
+  private pruneStaleSessions(): void {
+    const now = Date.now();
+    for (const [id, s] of this.sessions) {
+      if (id !== this.ownSessionId && now - s.lastSeen > STALE_MS) {
+        this.sessions.delete(id);
+      }
+    }
+  }
+
+  private createHandler() {
+    return (req: http.IncomingMessage, res: http.ServerResponse) => {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+      if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+
+      if (req.method === 'GET' && req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', role: 'hub', sessionId: this.ownSessionId }));
+        return;
+      }
+
+      if (req.method === 'POST' && req.url === '/sessions/register') {
+        this.parseBody(req, res, (body) => {
+          const { sessionId, agentUrl } = body as { sessionId: string; agentUrl: string };
+          this.registerSession(sessionId, agentUrl);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        });
+        return;
+      }
+
+      if (req.method === 'POST' && req.url === '/sessions/heartbeat') {
+        this.parseBody(req, res, (body) => {
+          const { sessionId } = body as { sessionId: string };
+          const ok = this.heartbeat(sessionId);
+          res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok }));
+        });
+        return;
+      }
+
+      if (req.method === 'POST' && req.url === '/mcp') {
+        this.parseBody(req, res, async (body) => {
+          const response = await this.handleMCPRequest(body as MCPRequest);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(response));
+        });
+        return;
+      }
+
+      res.writeHead(404);
+      res.end();
+    };
+  }
+
+  private parseBody(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    handler: (body: unknown) => void | Promise<void>
+  ): void {
+    let body = '';
+    let bodySize = 0;
+    const MAX_BODY = 1024 * 1024; // 1 MB
+    req.on('data', (chunk) => {
+      bodySize += chunk.length;
+      if (bodySize <= MAX_BODY) { body += chunk; }
+    });
+    req.on('end', async () => {
+      if (bodySize > MAX_BODY) {
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Request body too large' }));
+        return;
+      }
+      try {
+        await handler(JSON.parse(body));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: String(e) }));
+      }
+    });
+  }
+
+  private async handleMCPRequest(req: MCPRequest): Promise<MCPResponse> {
+    const base = { jsonrpc: '2.0' as const, id: req.id };
+    try {
+      switch (req.method) {
+        case 'initialize':
+          return {
+            ...base,
+            result: {
+              protocolVersion: '2024-11-05',
+              capabilities: { tools: {} },
+              serverInfo: { name: 'pylon', version: '0.2.0' },
+            },
+          };
+
+        case 'tools/list':
+          return { ...base, result: { tools: HUB_TOOLS } };
+
+        case 'tools/call': {
+          const params = req.params as { name: string; arguments: Record<string, unknown> };
+          const result = await this.routeToolCall(params.name, params.arguments ?? {});
+          return { ...base, result };
+        }
+
+        case 'notifications/initialized':
+          return { ...base, result: {} };
+
+        default:
+          return { ...base, error: { code: -32601, message: `Method not found: ${req.method}` } };
+      }
+    } catch (e) {
+      return { ...base, error: { code: -32603, message: String(e) } };
+    }
+  }
+
+  private async routeToolCall(
+    name: string,
+    args: Record<string, unknown>
+  ): Promise<{ content: Array<{ type: string; text: string }> }> {
+    const text = (s: string) => ({ content: [{ type: 'text', text: s }] });
+
+    if (name === 'terminal_list_sessions') {
+      const sessions = this.listSessions();
+      if (sessions.length === 0) return text('No sessions registered.');
+      const lines = sessions.map(
+        (s) => `${s.isHub ? '[hub]' : '[satellite]'} session="${s.sessionId}" agent=${s.agentUrl}`
+      );
+      return text(lines.join('\n'));
+    }
+
+    const sessionId = args.session_id as string | undefined;
+
+    // Aggregate terminal_list across all sessions when no session_id given
+    if (name === 'terminal_list' && !sessionId) {
+      this.pruneStaleSessions();
+      const parts: string[] = [];
+      for (const [sid, session] of this.sessions) {
+        try {
+          const result =
+            sid === this.ownSessionId
+              ? await this.ownAgent.callTool('terminal_list', args)
+              : await forwardToAgent(session.agentUrl, 'terminal_list', args);
+          const lines = result.content[0].text
+            .split('\n')
+            .map((l) => `[${sid}] ${l}`);
+          parts.push(...lines);
+        } catch {
+          parts.push(`[${sid}] (unreachable)`);
+        }
+      }
+      return text(parts.join('\n') || 'No terminals open across any session.');
+    }
+
+    // Route to satellite if session_id targets one
+    if (sessionId && sessionId !== this.ownSessionId) {
+      const session = this.sessions.get(sessionId);
+      if (!session) {
+        throw new Error(
+          `Session "${sessionId}" not found. Use terminal_list_sessions to see available sessions.`
+        );
+      }
+      return await forwardToAgent(session.agentUrl, name, args);
+    }
+
+    // Handle locally (hub's own window)
+    return await this.ownAgent.callTool(name, args);
+  }
+}
+
+async function forwardToAgent(
+  agentUrl: string,
+  tool: string,
+  params: Record<string, unknown>
+): Promise<ToolResult> {
+  const raw = await httpPost(`${agentUrl}/tool`, { tool, params });
+  return JSON.parse(raw) as ToolResult;
+}
