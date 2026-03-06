@@ -3,3 +3,4 @@ out/
 *.vsix
 *.js.map
 .DS_Store
+/.claude/
