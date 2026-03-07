@@ -10,6 +10,7 @@
     "url": "https://github.com/toalba/Pylon"
   },
   "engines": { "vscode": "^1.93.0" },
+  "icon": "images/icon.png",
   "categories": ["Other"],
   "keywords": ["mcp", "ai", "terminal", "claude", "copilot", "agent", "debug", "diagnostics"],
   "galleryBanner": {
