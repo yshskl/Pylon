@@ -2,7 +2,7 @@
   "name": "pylon",
   "displayName": "Pylon",
   "description": "VS Code MCP server for AI coding agents — terminals, diagnostics, multi-window, zero dependencies",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "local",
   "license": "MIT",
   "repository": {

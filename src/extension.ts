@@ -134,12 +134,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         vscode.window.showInformationMessage(
           `Pylon ${role}: ${info}`,
           'Copy MCP Config',
+          'Configure Tools',
           'Stop'
         ).then((choice) => {
           if (choice === 'Copy MCP Config') {
             const cfg = buildMCPConfig(port);
             vscode.env.clipboard.writeText(JSON.stringify(cfg, null, 2));
             vscode.window.showInformationMessage('MCP config copied to clipboard!');
+          } else if (choice === 'Configure Tools') {
+            vscode.commands.executeCommand('pylon.configureTools');
           } else if (choice === 'Stop') {
             vscode.commands.executeCommand('pylon.stopMCP');
           }

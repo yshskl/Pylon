@@ -633,7 +633,7 @@ export class HubServer {
             result: {
               protocolVersion: '2024-11-05',
               capabilities: { tools: {} },
-              serverInfo: { name: 'pylon', version: '0.2.0' }, // keep in sync with package.json
+              serverInfo: { name: 'pylon', version: '0.3.0' }, // keep in sync with package.json
             },
           };
 
