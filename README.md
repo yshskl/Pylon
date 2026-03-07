@@ -84,6 +84,16 @@ The extension auto-starts when VS Code opens. The status bar shows the current r
 | `rename_symbol` | LSP-powered rename that updates all references, imports, and type annotations across the workspace. |
 | `run_command` | Execute any VS Code command by ID. Universal escape hatch — format documents, organize imports, toggle settings, and anything else VS Code can do. |
 
+### Debug Tools
+
+| Tool | Description |
+|------|-------------|
+| `debug_breakpoints` | Add, remove, list, or clear breakpoints. Works without an active debug session. Supports conditional breakpoints and logpoints. |
+| `debug_start` | Start a debug session by launch.json config name or inline config object. Falls back to the default configuration. |
+| `debug_stop` | Stop the active debug session or all sessions. Optionally clear breakpoints on stop. |
+| `debug_state` | Full snapshot of current debug state — threads, call stacks, scopes, and variables in one call. No need to chain requests. |
+| `debug_control` | Control execution: continue, pause, step over/into/out, restart, or evaluate expressions in the debug context. |
+
 All tools accept an optional `session_id` parameter to target a specific VS Code window.
 
 ### Diagnostics Example

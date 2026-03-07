@@ -243,6 +243,103 @@ const HUB_TOOLS = [
       required: ['command'],
     },
   },
+  {
+    name: 'debug_breakpoints',
+    description:
+      'Add, remove, list, or clear breakpoints. Works without an active debug session. ' +
+      'Use "list" to see all current breakpoints, "add" to set a new one, "remove" to delete one, "clear" to remove all. ' +
+      SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['add', 'remove', 'list', 'clear'],
+          description: 'Breakpoint operation to perform',
+        },
+        file: { type: 'string', description: 'File path (required for add/remove)' },
+        line: { type: 'number', description: 'Line number, 1-based (required for add/remove)' },
+        condition: { type: 'string', description: 'Conditional expression (optional, for add)' },
+        hit_condition: { type: 'string', description: 'Hit count expression (optional, for add)' },
+        log_message: { type: 'string', description: 'Log message — makes it a logpoint (optional, for add)' },
+        ...SESSION_ID_PROP,
+      },
+      required: ['action'],
+    },
+  },
+  {
+    name: 'debug_start',
+    description:
+      'Start a debug session. Provide either a launch.json config name or an inline config object. ' +
+      'If neither is given, launches the default configuration. ' + SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Name of a launch.json configuration to run' },
+        config: {
+          type: 'object',
+          description:
+            'Inline debug configuration object (e.g. { "type": "node", "request": "launch", "program": "${workspaceFolder}/app.js" })',
+        },
+        ...SESSION_ID_PROP,
+      },
+    },
+  },
+  {
+    name: 'debug_stop',
+    description:
+      'Stop a debug session. By default stops the active session; set all=true to stop every session. ' +
+      SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        all: { type: 'boolean', description: 'Stop all debug sessions (default: false)' },
+        clear_breakpoints: { type: 'boolean', description: 'Clear all breakpoints after stopping (default: false)' },
+        ...SESSION_ID_PROP,
+      },
+    },
+  },
+  {
+    name: 'debug_state',
+    description:
+      'Get a full snapshot of the current debug state: threads, call stacks, scopes, and variables — all in one call. ' +
+      'No need to chain thread→frame→scope→variable requests. ' +
+      'Returns everything needed to understand program state at a breakpoint. ' + SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        thread_id: { type: 'number', description: 'Specific thread ID (optional, returns all threads if omitted)' },
+        max_depth: { type: 'number', description: 'Max variable nesting depth to expand (default: 1)' },
+        ...SESSION_ID_PROP,
+      },
+    },
+  },
+  {
+    name: 'debug_control',
+    description:
+      'Control execution of a debug session: continue, pause, step over/into/out, restart, or evaluate expressions. ' +
+      SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['continue', 'pause', 'next', 'stepIn', 'stepOut', 'restart', 'evaluate'],
+          description: 'Debug action to perform',
+        },
+        thread_id: { type: 'number', description: 'Thread ID (optional, uses first thread)' },
+        expression: { type: 'string', description: 'Expression to evaluate (required for "evaluate" action)' },
+        frame_id: { type: 'number', description: 'Frame ID for evaluation context (optional)' },
+        context: {
+          type: 'string',
+          enum: ['watch', 'repl', 'hover'],
+          description: 'Evaluation context (default: repl)',
+        },
+        ...SESSION_ID_PROP,
+      },
+      required: ['action'],
+    },
+  },
 ];
 
 export class HubServer {

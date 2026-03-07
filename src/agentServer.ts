@@ -102,6 +102,29 @@ export class AgentServer {
     return this.server !== null && this.server.listening;
   }
 
+  private async expandVariables(
+    session: vscode.DebugSession,
+    variablesReference: number,
+    depth: number,
+    maxDepth: number,
+    indent: number,
+    output: string[],
+    visited = new Set<number>(),
+  ): Promise<void> {
+    if (variablesReference === 0 || depth > maxDepth || visited.has(variablesReference)) return;
+    visited.add(variablesReference);
+    const resp = await session.customRequest('variables', { variablesReference });
+    const vars: Array<{ name: string; value: string; variablesReference: number }> =
+      resp.variables ?? [];
+    const prefix = '  '.repeat(indent);
+    for (const v of vars) {
+      output.push(`${prefix}${v.name} = ${v.value}`);
+      if (v.variablesReference > 0 && depth + 1 <= maxDepth) {
+        await this.expandVariables(session, v.variablesReference, depth + 1, maxDepth, indent + 1, output, visited);
+      }
+    }
+  }
+
   async callTool(name: string, args: Record<string, unknown>): Promise<ToolResult> {
     const text = (s: string): ToolResult => ({ content: [{ type: 'text', text: s }] });
 
@@ -338,6 +361,255 @@ export class AgentServer {
         } catch (e) {
           return text(`Command "${command}" failed: ${e}`);
         }
+      }
+
+      // ── Debug Tools ──────────────────────────────────────────────
+
+      case 'debug_breakpoints': {
+        const action = args.action as string;
+
+        if (action === 'list') {
+          const bps = vscode.debug.breakpoints;
+          if (bps.length === 0) return text('No breakpoints set.');
+          const lines: string[] = [];
+          for (const bp of bps) {
+            if (bp instanceof vscode.SourceBreakpoint) {
+              const loc = bp.location;
+              const rel = vscode.workspace.asRelativePath(loc.uri);
+              const line = loc.range.start.line + 1;
+              let desc = `${rel}:${line}`;
+              if (bp.condition) desc += ` condition="${bp.condition}"`;
+              if (bp.hitCondition) desc += ` hitCondition="${bp.hitCondition}"`;
+              if (bp.logMessage) desc += ` log="${bp.logMessage}"`;
+              if (!bp.enabled) desc += ' (disabled)';
+              lines.push(desc);
+            } else if (bp instanceof vscode.FunctionBreakpoint) {
+              let desc = `function: ${bp.functionName}`;
+              if (bp.condition) desc += ` condition="${bp.condition}"`;
+              if (!bp.enabled) desc += ' (disabled)';
+              lines.push(desc);
+            }
+          }
+          return text(`${lines.length} breakpoint(s):\n${lines.join('\n')}`);
+        }
+
+        if (action === 'clear') {
+          const bps = vscode.debug.breakpoints;
+          if (bps.length === 0) return text('No breakpoints to clear.');
+          vscode.debug.removeBreakpoints(bps);
+          return text(`Cleared ${bps.length} breakpoint(s).`);
+        }
+
+        // add / remove require file + line
+        const file = args.file as string | undefined;
+        const line = args.line as number | undefined;
+        if (!file || line === undefined) {
+          return text('Error: "file" and "line" are required for add/remove.');
+        }
+        const fileUri = file.includes('://') ? vscode.Uri.parse(file) : vscode.Uri.file(file);
+        const position = new vscode.Position(line - 1, 0); // 1-based → 0-based
+        const location = new vscode.Location(fileUri, position);
+
+        if (action === 'add') {
+          const bp = new vscode.SourceBreakpoint(
+            location,
+            true, // enabled
+            args.condition as string | undefined,
+            args.hit_condition as string | undefined,
+            args.log_message as string | undefined,
+          );
+          vscode.debug.addBreakpoints([bp]);
+          const rel = vscode.workspace.asRelativePath(fileUri);
+          return text(`Breakpoint added: ${rel}:${line}`);
+        }
+
+        if (action === 'remove') {
+          const match = vscode.debug.breakpoints.find(
+            (bp) =>
+              bp instanceof vscode.SourceBreakpoint &&
+              bp.location.uri.fsPath === fileUri.fsPath &&
+              bp.location.range.start.line === line - 1
+          );
+          if (!match) {
+            return text(`No breakpoint found at ${vscode.workspace.asRelativePath(fileUri)}:${line}.`);
+          }
+          vscode.debug.removeBreakpoints([match]);
+          return text(`Breakpoint removed: ${vscode.workspace.asRelativePath(fileUri)}:${line}`);
+        }
+
+        return text(`Unknown breakpoint action: "${action}". Use add, remove, list, or clear.`);
+      }
+
+      case 'debug_start': {
+        const configName = args.name as string | undefined;
+        const inlineConfig = args.config as vscode.DebugConfiguration | undefined;
+        const folder = vscode.workspace.workspaceFolders?.[0];
+
+        let started: boolean;
+        if (inlineConfig) {
+          started = await vscode.debug.startDebugging(folder, inlineConfig);
+        } else if (configName) {
+          started = await vscode.debug.startDebugging(folder, configName);
+        } else {
+          // Launch default config
+          started = await vscode.debug.startDebugging(folder, undefined as unknown as string);
+        }
+
+        if (!started) {
+          return text('Failed to start debug session. Check that a valid launch configuration exists.');
+        }
+        // Brief wait for session to initialize
+        await new Promise((r) => setTimeout(r, 500));
+        const session = vscode.debug.activeDebugSession;
+        return text(
+          `Debug session started: "${session?.name ?? 'unknown'}" (type: ${session?.type ?? 'unknown'})`
+        );
+      }
+
+      case 'debug_stop': {
+        const all = args.all as boolean | undefined;
+        const clearBps = args.clear_breakpoints as boolean | undefined;
+        if (all) {
+          await vscode.debug.stopDebugging(undefined);
+        } else {
+          const session = vscode.debug.activeDebugSession;
+          if (!session) {
+            return text('No active debug session.');
+          }
+          await vscode.debug.stopDebugging(session);
+        }
+        let msg = all ? 'All debug sessions stopped.' : 'Debug session stopped.';
+        if (clearBps) {
+          const bps = vscode.debug.breakpoints;
+          if (bps.length > 0) {
+            vscode.debug.removeBreakpoints(bps);
+            msg += ` Cleared ${bps.length} breakpoint(s).`;
+          }
+        }
+        return text(msg);
+      }
+
+      case 'debug_state': {
+        const session = vscode.debug.activeDebugSession;
+        if (!session) {
+          return text('No active debug session.');
+        }
+        const targetThreadId = args.thread_id as number | undefined;
+        const maxDepth = (args.max_depth as number | undefined) ?? 1;
+
+        const threadsResp = await session.customRequest('threads');
+        const threads: Array<{ id: number; name: string }> = threadsResp.threads ?? [];
+        if (threads.length === 0) {
+          return text('No threads available.');
+        }
+
+        const filtered = targetThreadId
+          ? threads.filter((t) => t.id === targetThreadId)
+          : threads;
+        if (filtered.length === 0) {
+          return text(`Thread ${targetThreadId} not found. Available: ${threads.map((t) => t.id).join(', ')}`);
+        }
+
+        const output: string[] = [];
+        for (const thread of filtered) {
+          let stackFrames: Array<{
+            id: number;
+            name: string;
+            source?: { name?: string; path?: string };
+            line: number;
+            column: number;
+          }> = [];
+          let stoppedReason = '';
+          try {
+            const stResp = await session.customRequest('stackTrace', {
+              threadId: thread.id,
+              startFrame: 0,
+              levels: 20,
+            });
+            stackFrames = stResp.stackFrames ?? [];
+          } catch {
+            stoppedReason = 'running';
+          }
+
+          output.push(
+            `Thread #${thread.id} "${thread.name}"${stoppedReason ? ` (${stoppedReason})` : ''}`
+          );
+
+          for (const frame of stackFrames) {
+            const src = frame.source?.path
+              ? vscode.workspace.asRelativePath(frame.source.path)
+              : frame.source?.name ?? '<unknown>';
+            output.push(`  Frame #${frame.id}: ${src}:${frame.line} in ${frame.name}`);
+
+            if (maxDepth < 1) continue;
+
+            try {
+              const scopesResp = await session.customRequest('scopes', { frameId: frame.id });
+              const scopes: Array<{ name: string; variablesReference: number; expensive: boolean }> =
+                scopesResp.scopes ?? [];
+
+              for (const scope of scopes) {
+                if (scope.expensive) {
+                  output.push(`    ${scope.name}: (expensive — skipped)`);
+                  continue;
+                }
+                output.push(`    ${scope.name}:`);
+                await this.expandVariables(session, scope.variablesReference, 1, maxDepth, 3, output);
+              }
+            } catch {
+              // scopes unavailable for this frame
+            }
+          }
+        }
+
+        return text(output.join('\n'));
+      }
+
+      case 'debug_control': {
+        const session = vscode.debug.activeDebugSession;
+        if (!session) {
+          return text('No active debug session.');
+        }
+        const action = args.action as string;
+
+        if (action === 'evaluate') {
+          const expression = args.expression as string | undefined;
+          if (!expression) {
+            return text('Error: "expression" is required for evaluate.');
+          }
+          const evalArgs: Record<string, unknown> = {
+            expression,
+            context: (args.context as string) ?? 'repl',
+          };
+          if (args.frame_id !== undefined) {
+            evalArgs.frameId = args.frame_id;
+          }
+          const result = await session.customRequest('evaluate', evalArgs);
+          return text(result.result ?? '(no result)');
+        }
+
+        if (action === 'restart') {
+          await vscode.commands.executeCommand('workbench.action.debug.restart');
+          return text('Debug session restarting.');
+        }
+
+        // continue, pause, next, stepIn, stepOut — all require threadId
+        let threadId = args.thread_id as number | undefined;
+        if (threadId === undefined) {
+          const threadsResp = await session.customRequest('threads');
+          const threads: Array<{ id: number }> = threadsResp.threads ?? [];
+          if (threads.length === 0) {
+            return text('No threads available.');
+          }
+          threadId = threads[0].id;
+        }
+
+        try {
+          await session.customRequest(action, { threadId });
+        } catch (e) {
+          return text(`"${action}" failed on thread ${threadId}: ${e}`);
+        }
+        return text(`"${action}" executed on thread ${threadId}.`);
       }
 
       default:
