@@ -454,6 +454,28 @@ const HUB_TOOLS = [
       required: ['action'],
     },
   },
+  {
+    name: 'debug_console_output',
+    description:
+      'Read debug console output (console.log, stderr, debugger messages) from the current or most recent debug session. ' +
+      'This captures DAP output events that are NOT available via terminal tools. ' +
+      'Use this to see what the debugged program prints. ' +
+      SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        lines: {
+          type: 'number',
+          description: 'Number of last lines to return (optional, returns all buffered output if omitted)',
+        },
+        clear: {
+          type: 'boolean',
+          description: 'Clear the buffer after reading (default: false)',
+        },
+        ...SESSION_ID_PROP,
+      },
+    },
+  },
 ];
 
 export class HubServer {

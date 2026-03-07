@@ -105,6 +105,7 @@ The extension auto-starts when VS Code opens. The status bar shows the current r
 | `debug_stop` | Stop the active debug session or all sessions. Optionally clear breakpoints on stop. |
 | `debug_state` | Full snapshot of current debug state — threads, call stacks, scopes, and variables in one call. No need to chain requests. |
 | `debug_control` | Control execution: continue, pause, step over/into/out, restart, or evaluate expressions in the debug context. |
+| `debug_console_output` | Read debug console output (console.log, stderr, debugger messages). Captures DAP output events not available via terminal tools. |
 
 All tools accept an optional `session_id` parameter to target a specific VS Code window.
 

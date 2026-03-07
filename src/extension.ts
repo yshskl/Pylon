@@ -20,7 +20,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.workspace.workspaceFolders?.[0]?.name ?? 'default';
 
   terminalManager = new TerminalManager(bufferLines);
-  agentServer = new AgentServer(terminalManager);
+  agentServer = new AgentServer(terminalManager, bufferLines);
+
+  // Capture DAP output events (console.log, stderr, debugger messages)
+  context.subscriptions.push(
+    vscode.debug.registerDebugAdapterTrackerFactory('*', {
+      createDebugAdapterTracker() {
+        return {
+          onDidSendMessage(message: { type?: string; event?: string; body?: { output?: string; category?: string } }) {
+            if (message.type === 'event' && message.event === 'output' && message.body?.output) {
+              if (message.body.category !== 'telemetry') {
+                agentServer?.appendDebugOutput(message.body.output, message.body.category);
+              }
+            }
+          },
+        };
+      },
+    })
+  );
 
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBarItem.command = 'pylon.showStatus';
@@ -110,7 +127,7 @@ async function startBridge(sessionId: string, bufferLines: number, hubPort: numb
     terminalManager = new TerminalManager(bufferLines);
   }
   if (!agentServer) {
-    agentServer = new AgentServer(terminalManager);
+    agentServer = new AgentServer(terminalManager, bufferLines);
   }
 
   try {
