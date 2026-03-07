@@ -243,6 +243,120 @@ const HUB_TOOLS = [
       required: ['command'],
     },
   },
+  // ── Editor Tools ──────────────────────────────────────────────
+  {
+    name: 'open_file',
+    description:
+      'Open a file in the VS Code editor and optionally jump to a line or highlight a range. ' +
+      'The human will see the file appear in their editor — use this to draw attention to specific code. ' +
+      SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file: { type: 'string', description: 'File path to open' },
+        line: { type: 'number', description: 'Line number to jump to, 1-based (optional)' },
+        end_line: { type: 'number', description: 'End line to highlight a range, 1-based (optional, requires line)' },
+        ...SESSION_ID_PROP,
+      },
+      required: ['file'],
+    },
+  },
+  {
+    name: 'format_document',
+    description:
+      'Format a file using the configured formatter (Prettier, ESLint, etc.) and save it. ' +
+      'Call this after editing files to ensure consistent code style. ' +
+      SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file: { type: 'string', description: 'File path to format' },
+        ...SESSION_ID_PROP,
+      },
+      required: ['file'],
+    },
+  },
+  {
+    name: 'organize_imports',
+    description:
+      'Remove unused imports and sort remaining imports in a file, then save. ' +
+      'Call this after refactoring to clean up stale imports. ' +
+      SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file: { type: 'string', description: 'File path to organize imports in' },
+        ...SESSION_ID_PROP,
+      },
+      required: ['file'],
+    },
+  },
+  {
+    name: 'fix_all',
+    description:
+      'Apply all auto-fixable diagnostics in a file (ESLint auto-fixes, missing semicolons, etc.) and save. ' +
+      'Run this after editing to resolve all issues that have automatic fixes. ' +
+      SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file: { type: 'string', description: 'File path to auto-fix' },
+        ...SESSION_ID_PROP,
+      },
+      required: ['file'],
+    },
+  },
+  {
+    name: 'save_all',
+    description:
+      'Save all open files with unsaved changes. ' +
+      'The human will see all dirty-file indicators clear. ' +
+      SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ...SESSION_ID_PROP,
+      },
+    },
+  },
+  {
+    name: 'find_in_files',
+    description:
+      'Open the VS Code workspace search panel with a query. The human will see search results populate in the sidebar. ' +
+      'Supports regex, file include/exclude globs, and optional replace. ' +
+      SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search query string' },
+        replace: { type: 'string', description: 'Replacement string (optional — opens find-and-replace if provided)' },
+        is_regex: { type: 'boolean', description: 'Treat query as a regex (default: false)' },
+        include: { type: 'string', description: 'Glob pattern for files to include (e.g. "src/**/*.ts")' },
+        exclude: { type: 'string', description: 'Glob pattern for files to exclude (e.g. "node_modules/**")' },
+        ...SESSION_ID_PROP,
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'get_hover_info',
+    description:
+      'Get type information, documentation, and signatures for a symbol at a specific position. ' +
+      'Returns what you would see when hovering over a symbol in VS Code — type signatures, JSDoc, parameter docs. ' +
+      'Use this to understand types without reading entire files. ' +
+      SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        uri: { type: 'string', description: 'File path or URI' },
+        line: { type: 'number', description: 'Line number (0-based)' },
+        character: { type: 'number', description: 'Column number (0-based)' },
+        ...SESSION_ID_PROP,
+      },
+      required: ['uri', 'line', 'character'],
+    },
+  },
+  // ── Debug Tools ──────────────────────────────────────────────
   {
     name: 'debug_breakpoints',
     description:

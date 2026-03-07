@@ -84,6 +84,18 @@ The extension auto-starts when VS Code opens. The status bar shows the current r
 | `rename_symbol` | LSP-powered rename that updates all references, imports, and type annotations across the workspace. |
 | `run_command` | Execute any VS Code command by ID. Universal escape hatch — format documents, organize imports, toggle settings, and anything else VS Code can do. |
 
+### Editor Tools
+
+| Tool | Description |
+|------|-------------|
+| `open_file` | Open a file in the editor and jump to a specific line or highlight a range. The human sees the file appear — use to draw attention to code. |
+| `format_document` | Format a file using the configured formatter (Prettier, ESLint, etc.) and save. Call after editing to ensure consistent style. |
+| `organize_imports` | Remove unused imports, sort remaining imports, and save. Call after refactoring to clean up stale imports. |
+| `fix_all` | Apply all auto-fixable diagnostics (ESLint fixes, missing semicolons, etc.) and save. |
+| `save_all` | Save all open files with unsaved changes. |
+| `find_in_files` | Open the workspace search panel with a query. Supports regex, file include/exclude globs, and find-and-replace. |
+| `get_hover_info` | Get type information, documentation, and signatures for a symbol at a position — what you'd see hovering in VS Code. |
+
 ### Debug Tools
 
 | Tool | Description |

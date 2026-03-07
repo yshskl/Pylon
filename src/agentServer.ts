@@ -363,6 +363,177 @@ export class AgentServer {
         }
       }
 
+      // ── Editor Tools ──────────────────────────────────────────────
+
+      case 'open_file': {
+        const file = args.file as string;
+        const line = args.line as number | undefined;
+        const endLine = args.end_line as number | undefined;
+        const fileUri = file.includes('://') ? vscode.Uri.parse(file) : vscode.Uri.file(file);
+
+        const doc = await vscode.workspace.openTextDocument(fileUri);
+        const editor = await vscode.window.showTextDocument(doc);
+
+        if (line !== undefined) {
+          const startLine = Math.min(Math.max(line - 1, 0), doc.lineCount - 1);
+          const startPos = new vscode.Position(startLine, 0);
+          const endPos = endLine
+            ? new vscode.Position(
+                Math.min(endLine - 1, doc.lineCount - 1),
+                doc.lineAt(Math.min(endLine - 1, doc.lineCount - 1)).text.length
+              )
+            : startPos;
+          editor.revealRange(new vscode.Range(startPos, endPos), vscode.TextEditorRevealType.InCenter);
+          editor.selection = new vscode.Selection(startPos, endPos);
+        }
+
+        const rel = vscode.workspace.asRelativePath(fileUri);
+        return text(`Opened ${rel}${line ? ` at line ${line}` : ''}${endLine ? `–${endLine}` : ''}`);
+      }
+
+      case 'format_document': {
+        const file = args.file as string;
+        const fileUri = file.includes('://') ? vscode.Uri.parse(file) : vscode.Uri.file(file);
+
+        const config = vscode.workspace.getConfiguration('editor', fileUri);
+        const options: vscode.FormattingOptions = {
+          tabSize: config.get<number>('tabSize', 4),
+          insertSpaces: config.get<boolean>('insertSpaces', true),
+        };
+
+        const edits = await vscode.commands.executeCommand<vscode.TextEdit[]>(
+          'vscode.executeFormatDocumentProvider',
+          fileUri,
+          options
+        );
+
+        if (!edits || edits.length === 0) {
+          return text(`No formatting changes needed for ${vscode.workspace.asRelativePath(fileUri)}.`);
+        }
+
+        const wsEdit = new vscode.WorkspaceEdit();
+        for (const edit of edits) {
+          wsEdit.replace(fileUri, edit.range, edit.newText);
+        }
+        await vscode.workspace.applyEdit(wsEdit);
+
+        const doc = await vscode.workspace.openTextDocument(fileUri);
+        if (doc.isDirty) await doc.save();
+
+        return text(`Formatted ${vscode.workspace.asRelativePath(fileUri)} (${edits.length} edit(s) applied).`);
+      }
+
+      case 'organize_imports': {
+        const file = args.file as string;
+        const fileUri = file.includes('://') ? vscode.Uri.parse(file) : vscode.Uri.file(file);
+        const doc = await vscode.workspace.openTextDocument(fileUri);
+        const fullRange = doc.validateRange(new vscode.Range(0, 0, doc.lineCount, 0));
+
+        const actions = await vscode.commands.executeCommand<vscode.CodeAction[]>(
+          'vscode.executeCodeActionProvider',
+          fileUri,
+          fullRange,
+          vscode.CodeActionKind.SourceOrganizeImports.value
+        );
+
+        if (!actions || actions.length === 0) {
+          return text(`No import changes needed for ${vscode.workspace.asRelativePath(fileUri)}.`);
+        }
+
+        for (const action of actions) {
+          if (action.edit) {
+            await vscode.workspace.applyEdit(action.edit);
+          }
+        }
+
+        if (doc.isDirty) await doc.save();
+        return text(`Organized imports in ${vscode.workspace.asRelativePath(fileUri)}.`);
+      }
+
+      case 'fix_all': {
+        const file = args.file as string;
+        const fileUri = file.includes('://') ? vscode.Uri.parse(file) : vscode.Uri.file(file);
+        const doc = await vscode.workspace.openTextDocument(fileUri);
+        const fullRange = doc.validateRange(new vscode.Range(0, 0, doc.lineCount, 0));
+
+        const actions = await vscode.commands.executeCommand<vscode.CodeAction[]>(
+          'vscode.executeCodeActionProvider',
+          fileUri,
+          fullRange,
+          vscode.CodeActionKind.SourceFixAll.value
+        );
+
+        if (!actions || actions.length === 0) {
+          return text(`No auto-fixable issues in ${vscode.workspace.asRelativePath(fileUri)}.`);
+        }
+
+        let fixCount = 0;
+        for (const action of actions) {
+          if (action.edit) {
+            await vscode.workspace.applyEdit(action.edit);
+            fixCount++;
+          }
+        }
+
+        if (doc.isDirty) await doc.save();
+        return text(`Applied ${fixCount} fix(es) in ${vscode.workspace.asRelativePath(fileUri)}.`);
+      }
+
+      case 'save_all': {
+        await vscode.workspace.saveAll(false);
+        return text('All files saved.');
+      }
+
+      case 'find_in_files': {
+        const query = args.query as string;
+        const replace = args.replace as string | undefined;
+        const isRegex = args.is_regex as boolean | undefined;
+        const include = args.include as string | undefined;
+        const exclude = args.exclude as string | undefined;
+
+        await vscode.commands.executeCommand('workbench.action.findInFiles', {
+          query,
+          replace,
+          isRegex: isRegex ?? false,
+          filesToInclude: include ?? '',
+          filesToExclude: exclude ?? '',
+          triggerSearch: true,
+        });
+
+        return text(`Search opened for "${query}"${replace ? ` with replace "${replace}"` : ''}.`);
+      }
+
+      case 'get_hover_info': {
+        const uri = args.uri as string;
+        const line = args.line as number;
+        const character = args.character as number;
+        const fileUri = uri.includes('://') ? vscode.Uri.parse(uri) : vscode.Uri.file(uri);
+        const position = new vscode.Position(line, character);
+
+        const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
+          'vscode.executeHoverProvider',
+          fileUri,
+          position
+        );
+
+        if (!hovers || hovers.length === 0) {
+          return text(`No hover info at ${vscode.workspace.asRelativePath(fileUri)}:${line}:${character}.`);
+        }
+
+        const parts: string[] = [];
+        for (const hover of hovers) {
+          for (const content of hover.contents) {
+            if (typeof content === 'string') {
+              parts.push(content);
+            } else if ('value' in content) {
+              parts.push(content.value);
+            }
+          }
+        }
+
+        return text(parts.join('\n\n'));
+      }
+
       // ── Debug Tools ──────────────────────────────────────────────
 
       case 'debug_breakpoints': {
