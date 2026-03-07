@@ -196,6 +196,7 @@ Terminal output is buffered via VS Code's shell integration events (`onDidStartT
 | `pylon.port` | `27681` | Hub port — must match the URL in your AI agent's MCP config |
 | `pylon.autoStart` | `true` | Auto-start on VS Code launch |
 | `pylon.outputBufferLines` | `2000` | Max lines kept per terminal buffer |
+| `pylon.disabledTools` | `[]` | Tool names to hide from AI agents (blocklist) |
 
 ## Ports
 
@@ -203,6 +204,21 @@ Terminal output is buffered via VS Code's shell integration events (`onDidStartT
 |------|------|
 | `27681` (configurable) | Hub — the registered MCP endpoint |
 | `27691–27700` | AgentServers — one per VS Code window (auto-assigned) |
+
+## Tool Access Control
+
+Control which tools AI agents can use. All tools are enabled by default.
+
+**Visual picker:** Command Palette → `Pylon: Configure Tool Access` — multi-select grouped by category (Terminal, IDE, Editor, Debug).
+
+**Manual:** Add tool names to `pylon.disabledTools` in settings:
+```json
+{
+  "pylon.disabledTools": ["debug_start", "rename_symbol", "run_command"]
+}
+```
+
+Disabled tools are hidden from `tools/list` and rejected on `tools/call`. Changes take effect immediately on the next agent request.
 
 ## Security
 

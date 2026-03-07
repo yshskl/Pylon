@@ -69,6 +69,60 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       vscode.window.showInformationMessage(lines.join('\n'), { modal: true });
     }),
 
+    vscode.commands.registerCommand('pylon.configureTools', async () => {
+      const toolCategories: Record<string, string[]> = {
+        'Terminal': [
+          'terminal_list_sessions', 'terminal_list', 'terminal_run',
+          'terminal_send_text', 'terminal_read_output', 'terminal_clear_buffer',
+        ],
+        'IDE': [
+          'get_diagnostics', 'get_document_symbols', 'get_references',
+          'rename_symbol', 'run_command',
+        ],
+        'Editor': [
+          'open_file', 'format_document', 'organize_imports', 'fix_all',
+          'save_all', 'find_in_files', 'get_hover_info',
+        ],
+        'Debug': [
+          'debug_breakpoints', 'debug_start', 'debug_stop',
+          'debug_state', 'debug_control', 'debug_console_output',
+        ],
+      };
+
+      const cfg = vscode.workspace.getConfiguration('pylon');
+      const disabled = new Set(cfg.get<string[]>('disabledTools', []));
+
+      const items: vscode.QuickPickItem[] = [];
+      for (const [category, tools] of Object.entries(toolCategories)) {
+        items.push({ label: category, kind: vscode.QuickPickItemKind.Separator });
+        for (const tool of tools) {
+          items.push({ label: tool, picked: !disabled.has(tool) });
+        }
+      }
+
+      const selected = await vscode.window.showQuickPick(items, {
+        canPickMany: true,
+        title: 'Pylon: Configure Tool Access',
+        placeHolder: 'Uncheck tools to hide them from AI agents',
+      });
+
+      if (selected === undefined) return; // cancelled
+
+      const allMenuTools = Object.values(toolCategories).flat();
+      const selectedNames = new Set(selected.map((i) => i.label));
+      // Preserve any manually-added disabled tool names not in the menu
+      const otherDisabled = [...disabled].filter((t) => !allMenuTools.includes(t));
+      const newlyDisabled = allMenuTools.filter((t) => !selectedNames.has(t));
+      const finalDisabled = [...otherDisabled, ...newlyDisabled];
+
+      await cfg.update('disabledTools', finalDisabled.length > 0 ? finalDisabled : undefined, vscode.ConfigurationTarget.Global);
+      vscode.window.showInformationMessage(
+        finalDisabled.length > 0
+          ? `Pylon: ${finalDisabled.length} tool(s) disabled. Changes take effect on next agent request.`
+          : 'Pylon: All tools enabled.'
+      );
+    }),
+
     vscode.commands.registerCommand('pylon.showStatus', () => {
       const port = hubServer?.port ?? hubPort;
       const role = hubServer?.isRunning ? 'Hub' : 'Satellite';

@@ -30,6 +30,10 @@
       {
         "command": "pylon.diagnose",
         "title": "Pylon: Diagnose Shell Integration"
+      },
+      {
+        "command": "pylon.configureTools",
+        "title": "Pylon: Configure Tool Access"
       }
     ],
     "configuration": {
@@ -49,6 +53,12 @@
           "type": "number",
           "default": 2000,
           "description": "Max lines to buffer from terminal output"
+        },
+        "pylon.disabledTools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "List of tool names to hide from AI agents (e.g. [\"debug_start\", \"rename_symbol\"]). Use 'Pylon: Configure Tool Access' command for a visual picker."
         }
       }
     }

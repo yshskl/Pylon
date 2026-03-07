@@ -1,4 +1,5 @@
 import * as http from 'http';
+import * as vscode from 'vscode';
 import { AgentServer, ToolResult } from './agentServer';
 import { httpPost } from './sessionManager';
 
@@ -636,11 +637,18 @@ export class HubServer {
             },
           };
 
-        case 'tools/list':
-          return { ...base, result: { tools: HUB_TOOLS } };
+        case 'tools/list': {
+          const disabled = new Set(vscode.workspace.getConfiguration('pylon').get<string[]>('disabledTools', []));
+          const tools = disabled.size > 0 ? HUB_TOOLS.filter((t) => !disabled.has(t.name)) : HUB_TOOLS;
+          return { ...base, result: { tools } };
+        }
 
         case 'tools/call': {
           const params = req.params as { name: string; arguments: Record<string, unknown> };
+          const disabled = new Set(vscode.workspace.getConfiguration('pylon').get<string[]>('disabledTools', []));
+          if (disabled.has(params.name)) {
+            return { ...base, error: { code: -32601, message: `Tool "${params.name}" is disabled. Enable it in Pylon settings.` } };
+          }
           const result = await this.routeToolCall(params.name, params.arguments ?? {});
           return { ...base, result };
         }
