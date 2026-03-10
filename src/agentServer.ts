@@ -169,12 +169,14 @@ export class AgentServer {
             case 'terminal_run': {
                 const command = args.command as string;
                 const terminalName = args.terminal_name as string | undefined;
+                const wait = (args.wait as boolean | undefined) ?? true;
+                if (!wait) {
+                    const actualName = this.terminalManager.sendText(command, terminalName);
+                    return text(`Command started in "${actualName}". Use terminal_read_output to check output.`);
+                }
                 const timeoutMs = (args.timeout_ms as number | undefined) ?? 30000;
                 const result = await this.terminalManager.executeCommand(command, terminalName, timeoutMs);
                 let response = result.output || '(no output)';
-                if (result.timedOut) {
-                    response += `\n\n[TIMED OUT after ${timeoutMs}ms — command may still be running. Use terminal_read_output to read ongoing output.]`;
-                }
                 if (result.exitCode !== undefined) {
                     response += `\n[exit code: ${result.exitCode}]`;
                 }

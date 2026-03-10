@@ -58,8 +58,13 @@ const HUB_TOOLS = [
   {
     name: 'terminal_run',
     description:
-      'Execute a shell command in a VS Code terminal. Captures and returns stdout/stderr. Requires shell integration. ' +
-      'Use terminal_name to target a specific terminal by name. ' + SESSION_ID_NOTE,
+      'Execute a shell command in a VS Code terminal and capture output. Requires shell integration. ' +
+      'Returns output once the command finishes OR output settles (no new data for ~3s). ' +
+      'For long-running commands (servers, watchers), output is returned once startup settles — ' +
+      'if the returned output seems incomplete, use terminal_read_output to get more. ' +
+      'Set wait=false to start the command without waiting for output (fire-and-forget), ' +
+      'then use terminal_read_output to check results later. ' +
+      SESSION_ID_NOTE,
     inputSchema: {
       type: 'object',
       properties: {
@@ -68,7 +73,8 @@ const HUB_TOOLS = [
           type: 'string',
           description: 'Name of target terminal (optional, uses active terminal if omitted)',
         },
-        timeout_ms: { type: 'number', description: 'Timeout in milliseconds (default: 30000)' },
+        timeout_ms: { type: 'number', description: 'Hard timeout in milliseconds (default: 30000). Command returns early if output settles before this.' },
+        wait: { type: 'boolean', description: 'Wait for output (default: true). Set false to start the command and return immediately without capturing output.' },
         ...SESSION_ID_PROP,
       },
       required: ['command'],
@@ -95,7 +101,9 @@ const HUB_TOOLS = [
     name: 'terminal_read_output',
     description:
       'Read buffered output from a terminal. ' +
-      'Captures ALL output including from long-running processes (dev servers, watchers, etc). ' +
+      'Use this after terminal_run to get additional output from long-running processes, ' +
+      'or after terminal_run with wait=false to read results. ' +
+      'Captures ALL output including from dev servers, watchers, build tools, etc. ' +
       'Buffer is populated from the moment the extension started. ' + SESSION_ID_NOTE,
     inputSchema: {
       type: 'object',
@@ -633,7 +641,7 @@ export class HubServer {
             result: {
               protocolVersion: '2024-11-05',
               capabilities: { tools: {} },
-              serverInfo: { name: 'pylon', version: '0.3.0' }, // keep in sync with package.json
+              serverInfo: { name: 'pylon', version: '0.4.0' }, // keep in sync with package.json
             },
           };
 
@@ -680,6 +688,17 @@ export class HubServer {
     }
 
     const sessionId = args.session_id as string | undefined;
+
+    // Fail-safe: reject calls without session_id when multiple sessions are active
+    // (except terminal_list which aggregates across all sessions)
+    if (!sessionId && name !== 'terminal_list' && this.sessions.size > 1) {
+      const available = [...this.sessions.keys()].map((s) => `"${s}"`).join(', ');
+      throw new Error(
+        `Multiple sessions active — session_id is required. ` +
+        `Available sessions: ${available}. ` +
+        `Use terminal_list_sessions to discover sessions, then pass session_id with every tool call.`
+      );
+    }
 
     // Aggregate terminal_list across all sessions when no session_id given
     if (name === 'terminal_list' && !sessionId) {

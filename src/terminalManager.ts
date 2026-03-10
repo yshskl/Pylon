@@ -125,9 +125,58 @@ export class TerminalManager {
     if (name) {
       const existing = vscode.window.terminals.find((t) => t.name === name);
       if (existing) return existing;
+      // Resolve shell profile from the name so "PowerShell" actually opens PowerShell
+      const resolved = this.resolveShellProfile(name);
+      if (resolved) {
+        return vscode.window.createTerminal({ name, shellPath: resolved.shellPath, shellArgs: resolved.shellArgs });
+      }
       return vscode.window.createTerminal(name);
     }
     return vscode.window.activeTerminal ?? vscode.window.createTerminal('Terminal');
+  }
+
+  /**
+   * Attempt to resolve a terminal name to an actual shell executable.
+   * Checks user-configured terminal profiles first, then falls back to well-known defaults.
+   */
+  private resolveShellProfile(name: string): { shellPath: string; shellArgs?: string[] } | undefined {
+    const lower = name.toLowerCase();
+
+    // Check VS Code terminal profiles (user/workspace settings)
+    const platform = process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'osx' : 'linux';
+    const profiles = vscode.workspace.getConfiguration('terminal.integrated.profiles').get<Record<string, { path?: string | string[]; args?: string[]; source?: string }>>(platform);
+    if (profiles) {
+      for (const [profileName, profile] of Object.entries(profiles)) {
+        if (profileName.toLowerCase() === lower && profile) {
+          if (profile.path) {
+            const shellPath = Array.isArray(profile.path) ? profile.path[0] : profile.path;
+            return { shellPath, shellArgs: profile.args };
+          }
+          // "source" profiles (e.g. source: "PowerShell") — fall through to well-known map
+        }
+      }
+    }
+
+    // Well-known shell name → executable mapping
+    const SHELL_MAP: Record<string, { shellPath: string; shellArgs?: string[] }> = {
+      'powershell': { shellPath: process.platform === 'win32' ? 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' : 'pwsh' },
+      'pwsh': { shellPath: 'pwsh' },
+      'cmd': { shellPath: 'C:\\Windows\\System32\\cmd.exe' },
+      'command prompt': { shellPath: 'C:\\Windows\\System32\\cmd.exe' },
+      'bash': { shellPath: process.platform === 'win32' ? 'C:\\Windows\\System32\\bash.exe' : 'bash' },
+      'wsl': { shellPath: process.platform === 'win32' ? 'C:\\Windows\\System32\\wsl.exe' : 'bash' },
+      'zsh': { shellPath: 'zsh' },
+      'fish': { shellPath: 'fish' },
+      'git bash': { shellPath: 'C:\\Program Files\\Git\\bin\\bash.exe' },
+    };
+
+    for (const [key, value] of Object.entries(SHELL_MAP)) {
+      if (lower.includes(key)) {
+        return value;
+      }
+    }
+
+    return undefined;
   }
 
   async executeCommand(
@@ -157,7 +206,8 @@ export class TerminalManager {
     this.ownExecutions.add(execution);
 
     let output = '';
-    let timedOut = false;
+    let finished = false;
+    let settled = false;
     let exitCode: number | undefined;
 
     const exitCodePromise = new Promise<number | undefined>((resolve) => {
@@ -170,40 +220,70 @@ export class TerminalManager {
     });
 
     const buf = this.getBuffer(terminal);
+
+    // Track when output settles (no new data for `idleMs`)
+    const idleMs = 3000;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    let resolveIdle: (() => void) | undefined;
+    const idlePromise = new Promise<void>((resolve) => { resolveIdle = resolve; });
+    const resetIdleTimer = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      // Only start idle detection after we have some output, and not after finish
+      if (output.length > 0 && !finished) {
+        idleTimer = setTimeout(() => { if (!finished) { settled = true; resolveIdle!(); } }, idleMs);
+      }
+    };
+
     const readPromise = (async () => {
       for await (const chunk of execution.read()) {
         output += chunk;
-        buf.append(chunk); // also populate the buffer for readOutput
-        if (timedOut) break;
+        buf.append(chunk);
+        resetIdleTimer();
+        if (settled) break;
       }
+      finished = true;
     })();
 
-    const timeoutPromise = new Promise<void>((resolve) =>
-      setTimeout(() => { timedOut = true; resolve(); }, timeoutMs)
-    );
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<void>((resolve) => {
+      timeoutHandle = setTimeout(() => resolve(), timeoutMs);
+    });
 
-    await Promise.race([readPromise, timeoutPromise]);
+    // Wait for: command finishes, output settles (idle), or hard timeout
+    await Promise.race([readPromise, idlePromise, timeoutPromise]);
+
+    if (idleTimer) clearTimeout(idleTimer);
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    const timedOut = !finished && !settled;
 
     this.ownExecutions.delete(execution);
 
-    if (!timedOut) {
+    if (finished) {
       exitCode = await Promise.race([
         exitCodePromise,
         new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 2000)),
       ]);
     }
 
+    let response = cleanShellOutput(output) || '(no output)';
+    if (settled && !finished) {
+      response += `\n\n[Output idle for ${idleMs / 1000}s — command still running. Use terminal_read_output to check for new output later.]`;
+    } else if (timedOut) {
+      response += `\n\n[TIMED OUT after ${timeoutMs}ms — command may still be running. Use terminal_read_output to read ongoing output.]`;
+    }
+
     return {
-      output: cleanShellOutput(output) || '(no output)',
+      output: response,
       exitCode,
-      timedOut,
+      timedOut: timedOut || settled,
     };
   }
 
-  sendText(text: string, terminalName?: string, addNewline = true): void {
+  sendText(text: string, terminalName?: string, addNewline = true): string {
     const terminal = this.getOrCreateTerminal(terminalName);
     terminal.show(true);
     terminal.sendText(text, addNewline);
+    return terminal.name;
   }
 
   readOutput(terminalName?: string, lines?: number): string {

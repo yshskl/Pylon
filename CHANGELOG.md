@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0
+
+### Fixed
+- **Terminal shell resolution** — creating a terminal by name (e.g. "PowerShell") now opens the correct shell instead of the default profile. Checks VS Code terminal profiles first, falls back to well-known shell executables.
+
+### Changed
+- **Smart command output** — `terminal_run` now returns early when output settles (3s idle) instead of blocking until the full timeout for long-running commands (servers, watchers)
+- **`wait` parameter** — `terminal_run` accepts `wait: false` to fire-and-forget commands; use `terminal_read_output` to check results later
+- Improved tool descriptions to guide agents on using `terminal_read_output` for incomplete output
+
 ## 0.3.0
 
 ### Added
