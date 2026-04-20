@@ -13,6 +13,25 @@ export interface CommandResult {
   timedOut: boolean;
 }
 
+interface ExecutionState {
+  execution: vscode.TerminalShellExecution;
+  terminalName: string;
+  commandLine: string;
+  startedAt: number;
+  output: string;
+  deliveredLength: number;
+  endPromise: Promise<number | undefined>;
+  resolveEnd: (exitCode: number | undefined) => void;
+}
+
+interface RecentResult {
+  undeliveredOutput: string;
+  exitCode: number | undefined;
+  finishedAt: number;
+}
+
+const RECENT_RESULT_TTL_MS = 60_000;
+
 class OutputBuffer {
   private lines: string[] = [];
   private maxLines: number;
@@ -72,6 +91,8 @@ export class TerminalManager {
   private maxBufferLines: number;
   // Track executions we started so the passive listener skips them (we buffer directly)
   private ownExecutions = new Set<vscode.TerminalShellExecution>();
+  private activeExecutions = new Map<string, ExecutionState>();
+  private recentResults = new Map<string, RecentResult>();
 
   constructor(maxBufferLines: number) {
     this.maxBufferLines = maxBufferLines;
