@@ -366,6 +366,58 @@ export class TerminalManager {
     };
   }
 
+  async startBackgroundExecution(
+    command: string,
+    terminalName?: string
+  ): Promise<{ terminalName: string; message: string }> {
+    const terminal = this.getOrCreateTerminal(terminalName);
+
+    const existing = this.activeExecutions.get(terminal.name);
+    if (existing) {
+      throw this.busyError(terminal.name, existing);
+    }
+
+    terminal.show(true);
+
+    if (!terminal.shellIntegration) {
+      await this.waitForShellIntegration(terminal, 8000);
+    }
+
+    if (!terminal.shellIntegration) {
+      terminal.sendText(command);
+      return {
+        terminalName: terminal.name,
+        message:
+          `Shell integration unavailable. Command sent via sendText to '${terminal.name}'; ` +
+          `terminal_wait won't return an exit code for this terminal.`,
+      };
+    }
+
+    const execution = terminal.shellIntegration.executeCommand(command);
+    this.ownExecutions.add(execution);
+    const state = this.registerExecution({ terminal, execution }, command);
+    const buf = this.getBuffer(terminal);
+
+    // Drain the read iterator in the background into state.output + buf.
+    (async () => {
+      try {
+        for await (const chunk of execution.read()) {
+          state.output += chunk;
+          buf.append(chunk);
+        }
+      } finally {
+        this.ownExecutions.delete(execution);
+      }
+    })();
+
+    return {
+      terminalName: terminal.name,
+      message:
+        `Command started in terminal '${terminal.name}': ${command}\n` +
+        `Use terminal_wait (terminal_name='${terminal.name}') to retrieve output and exit code.`,
+    };
+  }
+
   sendText(text: string, terminalName?: string, addNewline = true): string {
     const terminal = this.getOrCreateTerminal(terminalName);
     terminal.show(true);
