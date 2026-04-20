@@ -107,6 +107,26 @@ export class TerminalManager {
     return this.outputBuffers.get(key)!;
   }
 
+  private registerExecution(
+    e: { terminal: vscode.Terminal; execution: vscode.TerminalShellExecution },
+    commandLine: string
+  ): ExecutionState {
+    let resolveEnd!: (exitCode: number | undefined) => void;
+    const endPromise = new Promise<number | undefined>((resolve) => { resolveEnd = resolve; });
+    const state: ExecutionState = {
+      execution: e.execution,
+      terminalName: e.terminal.name,
+      commandLine,
+      startedAt: Date.now(),
+      output: '',
+      deliveredLength: 0,
+      endPromise,
+      resolveEnd,
+    };
+    this.activeExecutions.set(e.terminal.name, state);
+    return state;
+  }
+
   private setupListeners(): void {
     // Passively buffer output from user-typed commands when shell integration is active.
     // onDidWriteTerminalData is a proposed API (blocked for packaged extensions), so we
@@ -114,20 +134,53 @@ export class TerminalManager {
     this.disposables.push(
       vscode.window.onDidStartTerminalShellExecution(async (e) => {
         if (this.ownExecutions.has(e.execution)) {
-          return; // executeCommand handles buffering for its own executions
+          return; // executeCommand handles buffering + registration for its own executions
         }
+        const commandLine = e.execution.commandLine?.value ?? '<user-typed command>';
+        const state = this.registerExecution(e, commandLine);
         const buf = this.getBuffer(e.terminal);
         for await (const chunk of e.execution.read()) {
           buf.append(chunk);
+          state.output += chunk;
         }
       })
     );
 
     this.disposables.push(
+      vscode.window.onDidEndTerminalShellExecution((e) => {
+        const state = this.activeExecutions.get(e.terminal.name);
+        if (!state || state.execution !== e.execution) return;
+        this.activeExecutions.delete(e.terminal.name);
+        state.resolveEnd(e.exitCode);
+        const finishedAt = Date.now();
+        const undeliveredOutput = state.output.slice(state.deliveredLength);
+        this.recentResults.set(e.terminal.name, {
+          undeliveredOutput,
+          exitCode: e.exitCode,
+          finishedAt,
+        });
+        setTimeout(() => {
+          // Only expire if this exact entry is still the current cached result.
+          // If a newer execution finished and replaced the entry in the meantime,
+          // its own TTL timer will handle expiry.
+          const current = this.recentResults.get(e.terminal.name);
+          if (current && current.finishedAt === finishedAt) {
+            this.recentResults.delete(e.terminal.name);
+          }
+        }, RECENT_RESULT_TTL_MS);
+      })
+    );
+
+    this.disposables.push(
       vscode.window.onDidCloseTerminal((terminal) => {
-        // Flush partial line then remove — buffer is inaccessible after terminal closes
         this.outputBuffers.get(terminal.name)?.flush();
         this.outputBuffers.delete(terminal.name);
+        const state = this.activeExecutions.get(terminal.name);
+        if (state) {
+          this.activeExecutions.delete(terminal.name);
+          state.resolveEnd(undefined);
+        }
+        this.recentResults.delete(terminal.name);
       })
     );
   }
