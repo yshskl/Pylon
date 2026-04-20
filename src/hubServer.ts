@@ -58,13 +58,16 @@ const HUB_TOOLS = [
   {
     name: 'terminal_run',
     description:
-      'Execute a shell command in a VS Code terminal and capture output. Requires shell integration. ' +
-      'Returns output once the command finishes OR output settles (no new data for ~3s). ' +
-      'For long-running commands (servers, watchers), output is returned once startup settles — ' +
-      'if the returned output seems incomplete, use terminal_read_output to get more. ' +
-      'Set wait=false to start the command without waiting for output (fire-and-forget), ' +
-      'then use terminal_read_output to check results later. ' +
-      SESSION_ID_NOTE,
+      'Execute a shell command in a VS Code terminal and capture output. Requires shell integration.\n' +
+      'Blocks until the command finishes or timeout_ms elapses (default 300000 = 5 min). Output ' +
+      'streams live via progress notifications while blocking. On timeout, the command keeps running ' +
+      'and the response ends with \'[STILL RUNNING — ...]\' — call terminal_wait to resume.\n' +
+      'For commands expected to exceed ~30s (builds, installs, long tests), prefer wait=false + ' +
+      'progressive terminal_wait calls starting at timeout_ms=10000 then 30000. Between waits you ' +
+      'can read partial output, send input with terminal_send_text, or abort with \'\\x03\'.\n' +
+      'If the target terminal is busy (Pylon- OR user-typed command still running), this call refuses ' +
+      'with an error naming the active command. Pick a different terminal or call terminal_wait first.\n' +
+      'Returns final output with \'[exit code: N]\' on success. ' + SESSION_ID_NOTE,
     inputSchema: {
       type: 'object',
       properties: {
@@ -73,7 +76,7 @@ const HUB_TOOLS = [
           type: 'string',
           description: 'Name of target terminal (optional, uses active terminal if omitted)',
         },
-        timeout_ms: { type: 'number', description: 'Hard timeout in milliseconds (default: 30000). Command returns early if output settles before this.' },
+        timeout_ms: { type: 'number', description: 'Hard timeout in milliseconds (default: 300000 = 5 min). On timeout, the command keeps running — use terminal_wait to continue retrieving output.' },
         wait: { type: 'boolean', description: 'Wait for output (default: true). Set false to start the command and return immediately without capturing output.' },
         ...SESSION_ID_PROP,
       },
@@ -83,9 +86,10 @@ const HUB_TOOLS = [
   {
     name: 'terminal_send_text',
     description:
-      'Send text/input to a terminal WITHOUT capturing output. ' +
-      'Use this to interact with running processes (e.g. answer prompts, send Ctrl+C via \\x03). ' +
-      SESSION_ID_NOTE,
+      'Send text/input to a terminal WITHOUT capturing output. Works on busy terminals — this is ' +
+      'how you answer prompts in a running command or abort it (send \'\\x03\' for Ctrl+C, ' +
+      '\'\\x04\' for Ctrl+D). Use terminal_wait afterward to retrieve the result of the ' +
+      'interrupted command. ' + SESSION_ID_NOTE,
     inputSchema: {
       type: 'object',
       properties: {
@@ -129,6 +133,27 @@ const HUB_TOOLS = [
         terminal_name: { type: 'string', description: 'Name of terminal (optional, uses active terminal)' },
         ...SESSION_ID_PROP,
       },
+    },
+  },
+  {
+    name: 'terminal_wait',
+    description:
+      'Wait for the current (or most recent) execution in a terminal to finish, and return its ' +
+      'output and exit code. Blocks up to timeout_ms (default 300000). On timeout, returns output ' +
+      'accumulated during this wait with \'[STILL RUNNING — ...]\' — call again to continue waiting, ' +
+      'or send \'\\x03\' via terminal_send_text to abort. ' +
+      'Use this to retrieve results after terminal_run(wait=false), to progressively check on a ' +
+      'long-running command, or to wait for a user-typed command in a shared terminal. ' +
+      'If the terminal has no active execution but one finished within the last 60s, returns that ' +
+      'cached result. Otherwise errors. ' + SESSION_ID_NOTE,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        terminal_name: { type: 'string', description: 'Name of target terminal (required).' },
+        timeout_ms: { type: 'number', description: 'Max milliseconds to block (default: 300000).' },
+        ...SESSION_ID_PROP,
+      },
+      required: ['terminal_name'],
     },
   },
   {

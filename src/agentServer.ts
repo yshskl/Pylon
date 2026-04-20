@@ -171,10 +171,10 @@ export class AgentServer {
                 const terminalName = args.terminal_name as string | undefined;
                 const wait = (args.wait as boolean | undefined) ?? true;
                 if (!wait) {
-                    const actualName = this.terminalManager.sendText(command, terminalName);
-                    return text(`Command started in "${actualName}". Use terminal_read_output to check output.`);
+                    const result = await this.terminalManager.startBackgroundExecution(command, terminalName);
+                    return text(result.message);
                 }
-                const timeoutMs = (args.timeout_ms as number | undefined) ?? 30000;
+                const timeoutMs = (args.timeout_ms as number | undefined) ?? 300_000;
                 const result = await this.terminalManager.executeCommand(command, terminalName, timeoutMs);
                 let response = result.output || '(no output)';
                 if (result.exitCode !== undefined) {
@@ -205,6 +205,20 @@ export class AgentServer {
                 const terminalName = args.terminal_name as string | undefined;
                 this.terminalManager.clearBuffer(terminalName);
                 return text('Buffer cleared.');
+            }
+
+            case 'terminal_wait': {
+                const terminalName = args.terminal_name as string;
+                if (!terminalName) {
+                    throw new Error("terminal_wait requires 'terminal_name'.");
+                }
+                const timeoutMs = (args.timeout_ms as number | undefined) ?? 300_000;
+                const result = await this.terminalManager.waitForExecution(terminalName, timeoutMs);
+                let response = result.output || '(no output)';
+                if (result.exitCode !== undefined) {
+                    response += `\n[exit code: ${result.exitCode}]`;
+                }
+                return text(response);
             }
 
             case 'get_diagnostics': {
