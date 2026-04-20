@@ -617,9 +617,33 @@ export class HubServer {
 
       if (req.method === 'POST' && req.url === '/mcp') {
         this.parseBody(req, res, async (body) => {
-          const response = await this.handleMCPRequest(body as MCPRequest);
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(response));
+          const request = body as MCPRequest;
+          const progressToken =
+            request.method === 'tools/call'
+              ? (request.params as { _meta?: { progressToken?: string | number } } | undefined)?._meta?.progressToken
+              : undefined;
+
+          if (progressToken !== undefined) {
+            res.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
+            let progressBytes = 0;
+            const onProgress = (chunk: string) => {
+              progressBytes += chunk.length;
+              res.write(
+                JSON.stringify({
+                  jsonrpc: '2.0',
+                  method: 'notifications/progress',
+                  params: { progressToken, progress: progressBytes, message: chunk },
+                }) + '\n'
+              );
+            };
+            const response = await this.handleMCPRequest(request, onProgress);
+            res.write(JSON.stringify(response) + '\n');
+            res.end();
+          } else {
+            const response = await this.handleMCPRequest(request);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(response));
+          }
         });
         return;
       }
@@ -656,7 +680,10 @@ export class HubServer {
     });
   }
 
-  private async handleMCPRequest(req: MCPRequest): Promise<MCPResponse> {
+  private async handleMCPRequest(
+    req: MCPRequest,
+    onProgress?: (chunk: string) => void,
+  ): Promise<MCPResponse> {
     const base = { jsonrpc: '2.0' as const, id: req.id };
     try {
       switch (req.method) {
@@ -682,7 +709,7 @@ export class HubServer {
           if (disabled.has(params.name)) {
             return { ...base, error: { code: -32601, message: `Tool "${params.name}" is disabled. Enable it in Pylon settings.` } };
           }
-          const result = await this.routeToolCall(params.name, params.arguments ?? {});
+          const result = await this.routeToolCall(params.name, params.arguments ?? {}, onProgress);
           return { ...base, result };
         }
 
@@ -699,7 +726,8 @@ export class HubServer {
 
   private async routeToolCall(
     name: string,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
+    onProgress?: (chunk: string) => void,
   ): Promise<{ content: Array<{ type: string; text: string }> }> {
     const text = (s: string) => ({ content: [{ type: 'text', text: s }] });
 
@@ -754,11 +782,13 @@ export class HubServer {
           `Session "${sessionId}" not found. Use terminal_list_sessions to see available sessions.`
         );
       }
+      // Progress notifications stream only when the tool runs on the hub. Satellite
+      // calls still return the final result; just no mid-flight chunks.
       return await forwardToAgent(session.agentUrl, name, args);
     }
 
     // Handle locally (hub's own window)
-    return await this.ownAgent.callTool(name, args);
+    return await this.ownAgent.callTool(name, args, onProgress);
   }
 }
 

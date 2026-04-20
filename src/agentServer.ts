@@ -159,7 +159,11 @@ export class AgentServer {
         return response;
     }
 
-    async callTool(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+    async callTool(
+        name: string,
+        args: Record<string, unknown>,
+        onProgress?: (chunk: string) => void,
+    ): Promise<ToolResult> {
         const text = (s: string): ToolResult => ({ content: [{ type: 'text', text: s }] });
 
         switch (name) {
@@ -183,7 +187,7 @@ export class AgentServer {
                     return text(result.message);
                 }
                 const timeoutMs = (args.timeout_ms as number | undefined) ?? 300_000;
-                const result = await this.terminalManager.executeCommand(command, terminalName, timeoutMs);
+                const result = await this.terminalManager.executeCommand(command, terminalName, timeoutMs, onProgress);
                 return text(this.formatCommandResult(result));
             }
 
