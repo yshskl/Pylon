@@ -22,6 +22,7 @@ interface ExecutionState {
   deliveredLength: number;
   endPromise: Promise<number | undefined>;
   resolveEnd: (exitCode: number | undefined) => void;
+  finishedAt?: number;  // set by the generic end-listener when the execution ends
 }
 
 interface RecentResult {
@@ -31,6 +32,7 @@ interface RecentResult {
 }
 
 const RECENT_RESULT_TTL_MS = 60_000;
+const END_EVENT_WAIT_MS = 2000;
 
 class OutputBuffer {
   private lines: string[] = [];
@@ -153,6 +155,7 @@ export class TerminalManager {
         this.activeExecutions.delete(e.terminal.name);
         state.resolveEnd(e.exitCode);
         const finishedAt = Date.now();
+        state.finishedAt = finishedAt;
         const undeliveredOutput = state.output.slice(state.deliveredLength);
         this.recentResults.set(e.terminal.name, {
           undeliveredOutput,
@@ -297,15 +300,6 @@ export class TerminalManager {
 
     const state = this.registerExecution({ terminal, execution }, command);
 
-    const endSub = vscode.window.onDidEndTerminalShellExecution((e) => {
-      if (e.execution !== execution) return;
-      endSub.dispose();
-      // The generic end-listener from setupListeners will fire too and handle
-      // activeExecutions cleanup + recentResults insertion. We just need to
-      // resolve the local exit code promise here if it hasn't resolved yet.
-      // (It will have: the generic listener also calls resolveEnd.)
-    });
-
     const buf = this.getBuffer(terminal);
 
     const readPromise = (async () => {
@@ -315,6 +309,9 @@ export class TerminalManager {
         if (onChunk) onChunk(chunk);
       }
     })();
+    // Attach a no-op handler so a mid-iteration rejection doesn't surface as
+    // UnhandledPromiseRejection if we return via the timeout path before `await`ing this.
+    readPromise.catch(() => {});
 
     let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<'timeout'>((resolve) => {
@@ -331,18 +328,20 @@ export class TerminalManager {
     this.ownExecutions.delete(execution);
 
     if (outcome === 'done') {
-      // execution.read() completed. exit code should be resolved via the generic
-      // end-listener; wait briefly in case of microtask ordering.
+      // The generic end-listener resolves endPromise when onDidEndTerminalShellExecution
+      // fires. VS Code does not guarantee the end event precedes read-iterator completion,
+      // so wait up to END_EVENT_WAIT_MS for it before giving up and returning undefined.
       const exitCode = await Promise.race([
         state.endPromise,
-        new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 2000)),
+        new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), END_EVENT_WAIT_MS)),
       ]);
       const slice = state.output.slice(state.deliveredLength);
       state.deliveredLength = state.output.length;
-      // Clean up recentResults the generic listener wrote — this caller already
-      // received the content.
+      // The generic end-listener wrote recentResults for *this* execution; we already
+      // delivered its content via the slice above. Delete only if the cached entry is
+      // still the one our generic listener wrote — identified by matching finishedAt.
       const recent = this.recentResults.get(terminal.name);
-      if (recent && recent.finishedAt >= state.startedAt) {
+      if (recent && state.finishedAt !== undefined && recent.finishedAt === state.finishedAt) {
         this.recentResults.delete(terminal.name);
       }
       return {
