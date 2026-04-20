@@ -253,12 +253,27 @@ export class TerminalManager {
     return undefined;
   }
 
+  private busyError(terminalName: string, state: ExecutionState): Error {
+    return new Error(
+      `Terminal '${terminalName}' is busy running: ${state.commandLine}. ` +
+      `Use terminal_wait to wait for completion, terminal_send_text to provide input ` +
+      `(send '\\x03' to abort), or target a different terminal.`
+    );
+  }
+
   async executeCommand(
     command: string,
     terminalName?: string,
-    timeoutMs = 30000
+    timeoutMs = 300_000,
+    onChunk?: (chunk: string) => void
   ): Promise<CommandResult> {
     const terminal = this.getOrCreateTerminal(terminalName);
+
+    const existing = this.activeExecutions.get(terminal.name);
+    if (existing) {
+      throw this.busyError(terminal.name, existing);
+    }
+
     terminal.show(true);
 
     if (!terminal.shellIntegration) {
@@ -269,8 +284,9 @@ export class TerminalManager {
       terminal.sendText(command);
       return {
         output:
-          '[Shell integration unavailable — command sent but output not capturable.\n' +
-          'Enable: settings > terminal.integrated.shellIntegration.enabled = true]',
+          '[Shell integration unavailable — command sent via sendText. terminal_wait ' +
+          'and exit codes won\'t work for this terminal.\n' +
+          'Enable: terminal.integrated.shellIntegration.enabled = true]',
         exitCode: undefined,
         timedOut: false,
       };
@@ -279,77 +295,75 @@ export class TerminalManager {
     const execution = terminal.shellIntegration.executeCommand(command);
     this.ownExecutions.add(execution);
 
-    let output = '';
-    let finished = false;
-    let settled = false;
-    let exitCode: number | undefined;
+    const state = this.registerExecution({ terminal, execution }, command);
 
-    const exitCodePromise = new Promise<number | undefined>((resolve) => {
-      const sub = vscode.window.onDidEndTerminalShellExecution((e) => {
-        if (e.execution === execution) {
-          sub.dispose();
-          resolve(e.exitCode);
-        }
-      });
+    const endSub = vscode.window.onDidEndTerminalShellExecution((e) => {
+      if (e.execution !== execution) return;
+      endSub.dispose();
+      // The generic end-listener from setupListeners will fire too and handle
+      // activeExecutions cleanup + recentResults insertion. We just need to
+      // resolve the local exit code promise here if it hasn't resolved yet.
+      // (It will have: the generic listener also calls resolveEnd.)
     });
 
     const buf = this.getBuffer(terminal);
 
-    // Track when output settles (no new data for `idleMs`)
-    const idleMs = 3000;
-    let idleTimer: ReturnType<typeof setTimeout> | undefined;
-    let resolveIdle: (() => void) | undefined;
-    const idlePromise = new Promise<void>((resolve) => { resolveIdle = resolve; });
-    const resetIdleTimer = () => {
-      if (idleTimer) clearTimeout(idleTimer);
-      // Only start idle detection after we have some output, and not after finish
-      if (output.length > 0 && !finished) {
-        idleTimer = setTimeout(() => { if (!finished) { settled = true; resolveIdle!(); } }, idleMs);
-      }
-    };
-
     const readPromise = (async () => {
       for await (const chunk of execution.read()) {
-        output += chunk;
+        state.output += chunk;
         buf.append(chunk);
-        resetIdleTimer();
-        if (settled) break;
+        if (onChunk) onChunk(chunk);
       }
-      finished = true;
     })();
 
     let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-    const timeoutPromise = new Promise<void>((resolve) => {
-      timeoutHandle = setTimeout(() => resolve(), timeoutMs);
+    const timeoutPromise = new Promise<'timeout'>((resolve) => {
+      timeoutHandle = setTimeout(() => resolve('timeout'), timeoutMs);
     });
 
-    // Wait for: command finishes, output settles (idle), or hard timeout
-    await Promise.race([readPromise, idlePromise, timeoutPromise]);
+    const outcome = await Promise.race([
+      readPromise.then(() => 'done' as const),
+      timeoutPromise,
+    ]);
 
-    if (idleTimer) clearTimeout(idleTimer);
     if (timeoutHandle) clearTimeout(timeoutHandle);
-    const timedOut = !finished && !settled;
 
     this.ownExecutions.delete(execution);
 
-    if (finished) {
-      exitCode = await Promise.race([
-        exitCodePromise,
+    if (outcome === 'done') {
+      // execution.read() completed. exit code should be resolved via the generic
+      // end-listener; wait briefly in case of microtask ordering.
+      const exitCode = await Promise.race([
+        state.endPromise,
         new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 2000)),
       ]);
+      const slice = state.output.slice(state.deliveredLength);
+      state.deliveredLength = state.output.length;
+      // Clean up recentResults the generic listener wrote — this caller already
+      // received the content.
+      const recent = this.recentResults.get(terminal.name);
+      if (recent && recent.finishedAt >= state.startedAt) {
+        this.recentResults.delete(terminal.name);
+      }
+      return {
+        output: cleanShellOutput(slice) || '(no output)',
+        exitCode,
+        timedOut: false,
+      };
     }
 
-    let response = cleanShellOutput(output) || '(no output)';
-    if (settled && !finished) {
-      response += `\n\n[Output idle for ${idleMs / 1000}s — command still running. Use terminal_read_output to check for new output later.]`;
-    } else if (timedOut) {
-      response += `\n\n[TIMED OUT after ${timeoutMs}ms — command may still be running. Use terminal_read_output to read ongoing output.]`;
-    }
-
+    // Timeout: command keeps running, terminal stays busy.
+    const slice = state.output.slice(state.deliveredLength);
+    state.deliveredLength = state.output.length;
+    const cleaned = cleanShellOutput(slice);
+    const body = cleaned || '(no output yet)';
     return {
-      output: response,
-      exitCode,
-      timedOut: timedOut || settled,
+      output:
+        `${body}\n\n[STILL RUNNING — ${Math.round(timeoutMs / 1000)}s elapsed, no exit yet. ` +
+        `Call terminal_wait (terminal_name='${terminal.name}') to continue waiting, ` +
+        `or send '\\x03' via terminal_send_text to abort.]`,
+      exitCode: undefined,
+      timedOut: true,
     };
   }
 
