@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.0 — Authoritative terminal completion
+
+### Added
+- **`terminal_wait` tool** — Wait for the current (or recently-completed) execution in a terminal to finish, returning output and exit code. Supports progressive check-ins via repeated calls with shorter timeouts.
+
+### Changed
+- **`terminal_run` authoritativeness** — Now returns the moment the command actually ends (via `onDidEndTerminalShellExecution`) rather than after a 3-second output-idle heuristic. Eliminates spurious early returns on silent pauses and the ~5s post-completion lag.
+- **`terminal_run` busy-terminal safety** — Now refuses with a clear error if the target terminal is already running a command (Pylon-invoked or user-typed). Prevents the silent output-corruption / fake exit-code-0 bug.
+- **`terminal_run` default timeout** — Raised from 30000 to 300000 ms. On timeout, commands keep running; use `terminal_wait` to resume polling.
+- **`terminal_run` progress streaming** — When the MCP client provides `_meta.progressToken`, streams output live via `notifications/progress` instead of waiting until completion.
+
 ## 0.4.0
 
 ### Fixed

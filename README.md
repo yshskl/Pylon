@@ -69,10 +69,11 @@ The extension auto-starts when VS Code opens. The status bar shows the current r
 |------|-------------|
 | `terminal_list_sessions` | **Call first.** Lists all connected VS Code windows with their session IDs. |
 | `terminal_list` | List open terminals. Without `session_id`: all sessions. With `session_id`: that window only. |
-| `terminal_run` | Execute a command and capture output (requires shell integration). |
+| `terminal_run` | Execute a command and capture output (requires shell integration). Returns the moment the command actually ends via shell execution events. Default timeout 300s. Refuses if the target terminal is already running a command. Streams live output via progress notifications when the MCP client provides `_meta.progressToken`. |
 | `terminal_send_text` | Send text/keystrokes to a terminal (`\x03` = Ctrl+C, `\x04` = Ctrl+D). |
 | `terminal_read_output` | Read buffered terminal output (works on all terminals, no shell integration needed). |
 | `terminal_clear_buffer` | Clear the output buffer for a terminal. |
+| `terminal_wait` | Wait for the current (or recently-completed) execution in a terminal to finish, returning output and exit code. Supports progressive check-ins via repeated calls with shorter timeouts. |
 
 ### IDE Tools
 
