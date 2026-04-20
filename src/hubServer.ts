@@ -623,7 +623,9 @@ export class HubServer {
               ? (request.params as { _meta?: { progressToken?: string | number } } | undefined)?._meta?.progressToken
               : undefined;
 
-          if (progressToken !== undefined) {
+          if (progressToken !== undefined && progressToken !== null) {
+            // Swallow mid-stream client-disconnect errors; don't crash the extension host.
+            res.on('error', () => {});
             res.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
             let progressBytes = 0;
             const onProgress = (chunk: string) => {
