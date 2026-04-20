@@ -421,6 +421,70 @@ export class TerminalManager {
     };
   }
 
+  async waitForExecution(
+    terminalName: string,
+    timeoutMs = 300_000
+  ): Promise<CommandResult & { fromCache?: boolean; cacheAgeMs?: number }> {
+    const state = this.activeExecutions.get(terminalName);
+    if (state) {
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<'timeout'>((resolve) => {
+        timeoutHandle = setTimeout(() => resolve('timeout'), timeoutMs);
+      });
+      const endPromise = state.endPromise.then((exitCode) => ({ kind: 'done' as const, exitCode }));
+      const outcome = await Promise.race([endPromise, timeoutPromise]);
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+
+      const slice = state.output.slice(state.deliveredLength);
+      state.deliveredLength = state.output.length;
+
+      if (outcome === 'timeout') {
+        const body = cleanShellOutput(slice) || '(no new output)';
+        return {
+          output:
+            `${body}\n\n[STILL RUNNING — ${Math.round(timeoutMs / 1000)}s waited, no exit yet. ` +
+            `Call terminal_wait again or send '\\x03' via terminal_send_text to abort.]`,
+          exitCode: undefined,
+          timedOut: true,
+        };
+      }
+
+      // Completed. The generic end-listener already wrote recentResults; clear it
+      // since we delivered the content here. Match by exact finishedAt identity to
+      // avoid deleting a newer entry that replaced ours.
+      const recent = this.recentResults.get(terminalName);
+      if (recent && state.finishedAt !== undefined && recent.finishedAt === state.finishedAt) {
+        this.recentResults.delete(terminalName);
+      }
+
+      return {
+        output: cleanShellOutput(slice) || '(no output)',
+        exitCode: outcome.exitCode,
+        timedOut: false,
+      };
+    }
+
+    // No active execution — check the recent-result cache.
+    const cached = this.recentResults.get(terminalName);
+    if (cached && Date.now() - cached.finishedAt < RECENT_RESULT_TTL_MS) {
+      this.recentResults.delete(terminalName);
+      const ageMs = Date.now() - cached.finishedAt;
+      const body = cleanShellOutput(cached.undeliveredOutput) || '(no output)';
+      return {
+        output: `${body}\n\n[completed ${Math.round(ageMs / 1000)}s ago]`,
+        exitCode: cached.exitCode,
+        timedOut: false,
+        fromCache: true,
+        cacheAgeMs: ageMs,
+      };
+    }
+
+    throw new Error(
+      `Terminal '${terminalName}' has no active or recent execution. ` +
+      `Start one with terminal_run, or check terminal_list.`
+    );
+  }
+
   sendText(text: string, terminalName?: string, addNewline = true): string {
     const terminal = this.getOrCreateTerminal(terminalName);
     terminal.show(true);
