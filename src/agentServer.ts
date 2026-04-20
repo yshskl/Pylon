@@ -1,6 +1,6 @@
 import * as http from 'http';
 import * as vscode from 'vscode';
-import { TerminalManager } from './terminalManager';
+import { TerminalManager, CommandResult } from './terminalManager';
 
 export interface ToolResult {
     content: Array<{ type: string; text: string }>;
@@ -151,6 +151,14 @@ export class AgentServer {
         }
     }
 
+    private formatCommandResult(result: CommandResult): string {
+        let response = result.output || '(no output)';
+        if (result.exitCode !== undefined) {
+            response += `\n[exit code: ${result.exitCode}]`;
+        }
+        return response;
+    }
+
     async callTool(name: string, args: Record<string, unknown>): Promise<ToolResult> {
         const text = (s: string): ToolResult => ({ content: [{ type: 'text', text: s }] });
 
@@ -176,11 +184,7 @@ export class AgentServer {
                 }
                 const timeoutMs = (args.timeout_ms as number | undefined) ?? 300_000;
                 const result = await this.terminalManager.executeCommand(command, terminalName, timeoutMs);
-                let response = result.output || '(no output)';
-                if (result.exitCode !== undefined) {
-                    response += `\n[exit code: ${result.exitCode}]`;
-                }
-                return text(response);
+                return text(this.formatCommandResult(result));
             }
 
             case 'terminal_send_text': {
@@ -214,11 +218,7 @@ export class AgentServer {
                 }
                 const timeoutMs = (args.timeout_ms as number | undefined) ?? 300_000;
                 const result = await this.terminalManager.waitForExecution(terminalName, timeoutMs);
-                let response = result.output || '(no output)';
-                if (result.exitCode !== undefined) {
-                    response += `\n[exit code: ${result.exitCode}]`;
-                }
-                return text(response);
+                return text(this.formatCommandResult(result));
             }
 
             case 'get_diagnostics': {
