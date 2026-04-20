@@ -388,8 +388,9 @@ export class TerminalManager {
       return {
         terminalName: terminal.name,
         message:
-          `Shell integration unavailable. Command sent via sendText to '${terminal.name}'; ` +
-          `terminal_wait won't return an exit code for this terminal.`,
+          `[Shell integration unavailable — command sent via sendText to '${terminal.name}'. ` +
+          `terminal_wait and exit codes won't work for this terminal.\n` +
+          `Enable: terminal.integrated.shellIntegration.enabled = true]`,
       };
     }
 
@@ -399,6 +400,8 @@ export class TerminalManager {
     const buf = this.getBuffer(terminal);
 
     // Drain the read iterator in the background into state.output + buf.
+    // Attach a no-op rejection handler so a mid-iteration error doesn't surface
+    // as UnhandledPromiseRejection. The generic end-listener still handles cleanup.
     (async () => {
       try {
         for await (const chunk of execution.read()) {
@@ -408,7 +411,7 @@ export class TerminalManager {
       } finally {
         this.ownExecutions.delete(execution);
       }
-    })();
+    })().catch(() => {});
 
     return {
       terminalName: terminal.name,
