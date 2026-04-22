@@ -67,7 +67,10 @@ const HUB_TOOLS = [
       'can read partial output, send input with terminal_send_text, or abort with \'\\x03\'.\n' +
       'If the target terminal is busy (Pylon- OR user-typed command still running), this call refuses ' +
       'with an error naming the active command. Pick a different terminal or call terminal_wait first.\n' +
-      'Returns final output with \'[exit code: N]\' on success. ' + SESSION_ID_NOTE,
+      'Returns final output with \'[exit code: N]\' on success.\n' +
+      'Note: on very short timeouts (<3s), the first return may show "(no output yet)" ' +
+      'due to shell-integration chunk delivery lag; call terminal_wait to retrieve the ' +
+      'actual output. ' + SESSION_ID_NOTE,
     inputSchema: {
       type: 'object',
       properties: {
@@ -104,10 +107,11 @@ const HUB_TOOLS = [
   {
     name: 'terminal_read_output',
     description:
-      'Read buffered output from a terminal. ' +
-      'Use this after terminal_run to get additional output from long-running processes, ' +
-      'or after terminal_run with wait=false to read results. ' +
-      'Captures ALL output including from dev servers, watchers, build tools, etc. ' +
+      'Read raw buffered output from a terminal (no exit code, includes user-typed ' +
+      'command output too). For commands started via terminal_run(wait=false), ' +
+      'prefer terminal_wait to retrieve output + exit code. ' +
+      'Use terminal_read_output for tailing long-running processes (dev servers, watchers) ' +
+      'where you just want a snapshot of what has been printed. ' +
       'Buffer is populated from the moment the extension started. ' + SESSION_ID_NOTE,
     inputSchema: {
       type: 'object',
@@ -700,7 +704,7 @@ export class HubServer {
             result: {
               protocolVersion: '2024-11-05',
               capabilities: { tools: {} },
-              serverInfo: { name: 'pylon', version: '0.4.0' }, // keep in sync with package.json
+              serverInfo: { name: 'pylon', version: '0.5.0' }, // keep in sync with package.json
             },
           };
 

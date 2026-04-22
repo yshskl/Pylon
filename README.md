@@ -31,7 +31,7 @@ AI Agent (Claude Code / Gemini / any MCP client)
 npm run compile
 npm install -g @vscode/vsce
 vsce package
-code --install-extension pylon-0.2.0.vsix
+code --install-extension pylon-mcp-0.5.0.vsix
 ```
 
 ### 2. Add MCP config to your AI agent
