@@ -337,12 +337,18 @@ export class TerminalManager {
       ]);
       const slice = state.output.slice(state.deliveredLength);
       state.deliveredLength = state.output.length;
-      // The generic end-listener wrote recentResults for *this* execution; we already
-      // delivered its content via the slice above. Delete only if the cached entry is
-      // still the one our generic listener wrote — identified by matching finishedAt.
+      // The generic end-listener wrote recentResults for this execution with the
+      // full output (since deliveredLength was 0 at the moment of the end event).
+      // We just delivered the content, so update the cache entry to empty undelivered
+      // content — don't delete it; a subsequent terminal_wait within the TTL should
+      // still find the entry and report "(no new output)" + exit code + age marker.
       const recent = this.recentResults.get(terminal.name);
       if (recent && state.finishedAt !== undefined && recent.finishedAt === state.finishedAt) {
-        this.recentResults.delete(terminal.name);
+        this.recentResults.set(terminal.name, {
+          undeliveredOutput: '',
+          exitCode: recent.exitCode,
+          finishedAt: recent.finishedAt,
+        });
       }
       return {
         output: cleanShellOutput(slice) || '(no output)',
@@ -449,12 +455,16 @@ export class TerminalManager {
         };
       }
 
-      // Completed. The generic end-listener already wrote recentResults; clear it
-      // since we delivered the content here. Match by exact finishedAt identity to
-      // avoid deleting a newer entry that replaced ours.
+      // We delivered the content; replace the cache entry with empty undelivered
+      // rather than deleting. A subsequent terminal_wait within the TTL will still
+      // find the entry and report "(no new output)" + exit code + age marker.
       const recent = this.recentResults.get(terminalName);
       if (recent && state.finishedAt !== undefined && recent.finishedAt === state.finishedAt) {
-        this.recentResults.delete(terminalName);
+        this.recentResults.set(terminalName, {
+          undeliveredOutput: '',
+          exitCode: recent.exitCode,
+          finishedAt: recent.finishedAt,
+        });
       }
 
       return {
