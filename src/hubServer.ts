@@ -626,20 +626,25 @@ export class HubServer {
           if (progressToken !== undefined && progressToken !== null) {
             // Swallow mid-stream client-disconnect errors; don't crash the extension host.
             res.on('error', () => {});
-            res.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
+            // MCP streamable-HTTP transport: stream responses are Server-Sent Events.
+            // Each message is encoded as: data: <JSON>\n\n
+            res.writeHead(200, {
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+              Connection: 'keep-alive',
+            });
             let progressBytes = 0;
             const onProgress = (chunk: string) => {
               progressBytes += chunk.length;
-              res.write(
-                JSON.stringify({
-                  jsonrpc: '2.0',
-                  method: 'notifications/progress',
-                  params: { progressToken, progress: progressBytes, message: chunk },
-                }) + '\n'
-              );
+              const note = {
+                jsonrpc: '2.0',
+                method: 'notifications/progress',
+                params: { progressToken, progress: progressBytes, message: chunk },
+              };
+              res.write(`data: ${JSON.stringify(note)}\n\n`);
             };
             const response = await this.handleMCPRequest(request, onProgress);
-            res.write(JSON.stringify(response) + '\n');
+            res.write(`data: ${JSON.stringify(response)}\n\n`);
             res.end();
           } else {
             const response = await this.handleMCPRequest(request);
