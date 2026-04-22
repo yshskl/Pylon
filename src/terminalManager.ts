@@ -257,9 +257,19 @@ export class TerminalManager {
   }
 
   private busyError(terminalName: string, state: ExecutionState): Error {
+    const elapsedSec = Math.max(0, Math.round((Date.now() - state.startedAt) / 1000));
+    const cleaned = cleanShellOutput(state.output);
+    const lines = cleaned ? cleaned.split('\n').filter((l) => l.length > 0) : [];
+    const tailCount = 3;
+    const tail = lines.slice(-tailCount);
+    const tailSection =
+      tail.length > 0
+        ? `last output:\n  ${tail.join('\n  ')}`
+        : 'no output yet';
     return new Error(
-      `Terminal '${terminalName}' is busy running: ${state.commandLine}. ` +
-      `Use terminal_wait to wait for completion, terminal_send_text to provide input ` +
+      `Terminal '${terminalName}' is busy running: ${state.commandLine} ` +
+      `(started ${elapsedSec}s ago, ${tailSection}). ` +
+      `Use terminal_wait to continue waiting, terminal_send_text to provide input ` +
       `(send '\\x03' to abort), or target a different terminal.`
     );
   }
