@@ -204,7 +204,7 @@ Terminal output is buffered via VS Code's shell integration events (`onDidStartT
 | Port | Role |
 |------|------|
 | `27681` (configurable) | Hub — the registered MCP endpoint |
-| `27691–27700` | AgentServers — one per VS Code window (auto-assigned) |
+| `pylon.port + 10` … `+19` | AgentServers — one per VS Code window (auto-assigned, follows the hub port) |
 
 ## Tool Access Control
 
@@ -221,8 +221,40 @@ Control which tools AI agents can use. All tools are enabled by default.
 
 Disabled tools are hidden from `tools/list` and rejected on `tools/call`. Changes take effect immediately on the next agent request.
 
+## Protocol
+
+Pylon speaks MCP **2026-07-28** and the older `initialize` revisions (`2024-11-05` through
+`2025-11-25`) on the same endpoint, picking per request — a request whose
+`MCP-Protocol-Version` header names the 2026 revision is served under its stateless rules,
+everything else under the handshake it negotiated. No client needs to change.
+
+Under 2026-07-28 Pylon additionally serves `server/discover`, validates the `Mcp-Method` /
+`Mcp-Name` headers against the body, and tags results with `resultType` and cache hints.
+
+## Resources and subscriptions
+
+| URI | Contents |
+|-----|----------|
+| `pylon://sessions` | Windows reachable through this hub |
+| `pylon://{session}/diagnostics` | Diagnostics for one window |
+| `pylon://{session}/debug/state` | Threads, frames and variables |
+| `pylon://{session}/terminal/{name}/buffer` | One terminal's buffered output |
+
+`subscriptions/listen` opens a stream that reports `notifications/resources/updated` as those
+change. Resources honour `pylon.disabledTools`: disabling a tool also hides the resource that
+projects it.
+
 ## Security
 
-- All servers bind to `127.0.0.1` only — no network exposure
-- No authentication — intended for local development use only
+- All servers bind to `127.0.0.1` only — no exposure to other machines
+- **Requests carrying an `Origin` header are rejected with 403**, as are requests whose `Host`
+  is neither `127.0.0.1` nor `localhost`. Binding to loopback keeps other machines out, but not
+  the browser running on yours: before this, any web page you visited could POST a `tools/call`
+  and run shell commands. AI agents are not browsers and send neither header, so this is
+  invisible to normal clients. `OPTIONS` answers 405 — no CORS headers are served at all.
+- Session registration only accepts an `agentUrl` on `127.0.0.1`, so tool output cannot be
+  routed off the machine.
+- **No authentication.** Any *other* process on your machine can still reach the endpoint and
+  run commands through it. Treat the ports as you would a local shell — intended for local
+  development use only.
 - Request bodies capped at 1 MB

@@ -10,3 +10,7 @@ tsconfig.json
 !out/**
 node_modules/**
 .gitignore
+.env
+docs/**
+proposel.md
+CLAUDE.md

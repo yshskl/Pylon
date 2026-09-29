@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.6.0 — MCP 2026-07-28, reverse channel, security fix
+
+### Security
+- **Browser-reachable command execution is closed.** Both servers sent
+  `Access-Control-Allow-Origin: *` and validated no headers, so any web page the user visited
+  could POST a `tools/call` to the hub, run shell commands and read the output. Requests
+  carrying an `Origin`, or a `Host` that is not loopback, are now refused with 403; no CORS
+  headers are served at all. **Any AI agent is unaffected** — none of them send either header.
+- Session registration now only accepts an `agentUrl` on `127.0.0.1`, so forwarded tool
+  output cannot be routed off the machine.
+- Internal planning documents are no longer packaged into the VSIX.
+
+### Added
+- **MCP 2026-07-28** alongside the older revisions, chosen per request: `server/discover`,
+  header validation (`-32020`), version negotiation (`-32022`), `resultType` and cache hints.
+- **Resources** — `pylon://sessions`, `.../diagnostics`, `.../debug/state`,
+  `.../terminal/{name}/buffer` — and `subscriptions/listen` to be told when they change.
+- **Progress from satellite windows.** `POST /tool` answers SSE when the hub has somewhere to
+  forward chunks to, falling back to a buffered reply against an older Pylon.
+- `GET /events`, a reverse channel the hub opens to each satellite, reconciled every 5s.
+- `debug_state` reports why the debugger stopped, from the DAP event that was being discarded.
+- `/sessions/unregister`, so a closing window is not mistaken for a crashed one for 15s.
+
+### Fixed
+- Satellite tool errors reached the agent as a result with no `content`; the aggregated
+  `terminal_list` reported every failure as `(unreachable)` regardless of cause.
+- HTTP helpers treated every status as success, so a satellite the hub had forgotten
+  heartbeat into the void forever instead of re-registering.
+- Request timeouts bounded socket idleness, not the exchange — a trickling peer could stall
+  activation indefinitely.
+- Stopping Pylon hung while any stream was open; sockets are now released.
+- A failed hub promotion left the window orphaned with no retry and a green status bar.
+- Multi-byte characters were corrupted at chunk boundaries in request bodies and in streamed
+  terminal output; ANSI sequences split across chunks leaked into the stream.
+- A leaked listener on every shell-integration timeout; unbounded per-execution output.
+
 ## 0.5.0 — Authoritative terminal completion
 
 ### Added

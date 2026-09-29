@@ -6,3 +6,4 @@ out/
 .vscode/
 /.claude/
 CLAUDE.md
+.env
