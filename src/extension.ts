@@ -3,21 +3,25 @@ import { TerminalManager } from './terminalManager';
 import { AgentServer } from './agentServer';
 import { HubServer } from './hubServer';
 import { SessionManager } from './sessionManager';
+import { debounce } from './events';
+import { sanitizeLabel } from './http';
 
 let terminalManager: TerminalManager | undefined;
 let agentServer: AgentServer | undefined;
 let hubServer: HubServer | undefined;
 let sessionManager: SessionManager | undefined;
 let statusBarItem: vscode.StatusBarItem | undefined;
+/** The port this activation is using — read once, so every path agrees on it. */
+let activeHubPort = 27681;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const config = vscode.workspace.getConfiguration('pylon');
   const bufferLines: number = config.get('outputBufferLines', 2000);
   const autoStart: boolean = config.get('autoStart', true);
   const hubPort: number = config.get('port', 27681);
+  activeHubPort = hubPort;
 
-  const sessionId =
-    vscode.workspace.workspaceFolders?.[0]?.name ?? 'default';
+  const sessionId = deriveSessionId();
 
   terminalManager = new TerminalManager(bufferLines);
   agentServer = new AgentServer(terminalManager, bufferLines);
@@ -25,13 +29,44 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Capture DAP output events (console.log, stderr, debugger messages)
   context.subscriptions.push(
     vscode.debug.registerDebugAdapterTrackerFactory('*', {
-      createDebugAdapterTracker() {
+      createDebugAdapterTracker(session) {
         return {
-          onDidSendMessage(message: { type?: string; event?: string; body?: { output?: string; category?: string } }) {
-            if (message.type === 'event' && message.event === 'output' && message.body?.output) {
+          onDidSendMessage(message: {
+            type?: string;
+            event?: string;
+            body?: {
+              output?: string;
+              category?: string;
+              reason?: string;
+              threadId?: number;
+              description?: string;
+            };
+          }) {
+            if (message.type !== 'event') return;
+
+            if (message.event === 'output' && message.body?.output) {
               if (message.body.category !== 'telemetry') {
                 agentServer?.appendDebugOutput(message.body.output, message.body.category);
               }
+              return;
+            }
+
+            // These were already arriving here and being thrown away. `stopped` in particular
+            // carries the reason execution halted, which debug_state could never report — it
+            // only ever saw the stack afterwards, so its stoppedReason was a placeholder.
+            if (message.event === 'stopped') {
+              const reason = message.body?.reason ?? 'unknown';
+              agentServer?.setStoppedReason(session.id, reason);
+              agentServer?.events.emit('debug.stopped', {
+                reason,
+                threadId: message.body?.threadId,
+                description: message.body?.description,
+              });
+            } else if (message.event === 'continued') {
+              agentServer?.setStoppedReason(session.id, null);
+            } else if (message.event === 'terminated' || message.event === 'exited') {
+              agentServer?.setStoppedReason(session.id, null);
+              agentServer?.events.emit('debug.terminated', {});
             }
           },
         };
@@ -45,6 +80,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   statusBarItem.tooltip = 'Pylon — click for status';
   statusBarItem.show();
   context.subscriptions.push(statusBarItem);
+
+  // Diagnostics fire on every keystroke, so this is debounced hard: subscribers re-read the
+  // resource, they do not apply a delta, and one "something changed" per settle is enough.
+  const emitDiagnostics = debounce((uris: readonly vscode.Uri[]) => {
+    agentServer?.events.emit('diagnostics.changed', { files: uris.map((u) => u.fsPath).slice(0, 50) });
+  }, 500);
+  context.subscriptions.push(
+    vscode.languages.onDidChangeDiagnostics((e) => emitDiagnostics(e.uris)),
+    // debug.started rounds out the debug lifecycle: without it a subscriber to the debug
+    // state resource learns about stops and exits but never about a session beginning.
+    vscode.debug.onDidStartDebugSession((session) =>
+      agentServer?.events.emit('debug.started', { name: session.name, type: session.type }),
+    ),
+    { dispose: () => emitDiagnostics.dispose() },
+  );
 
   context.subscriptions.push(
     vscode.commands.registerCommand('pylon.startMCP', async () => {
@@ -73,7 +123,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const toolCategories: Record<string, string[]> = {
         'Terminal': [
           'terminal_list_sessions', 'terminal_list', 'terminal_run',
-          'terminal_send_text', 'terminal_read_output', 'terminal_clear_buffer',
+          'terminal_send_text', 'terminal_read_output', 'terminal_clear_buffer', 'terminal_wait',
         ],
         'IDE': [
           'get_diagnostics', 'get_document_symbols', 'get_references',
@@ -126,9 +176,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('pylon.showStatus', () => {
       const port = hubServer?.port ?? hubPort;
       const role = hubServer?.isRunning ? 'Hub' : 'Satellite';
+      // Use the id actually registered, not the pre-disambiguation one this closure captured at
+      // activation — a name collision can have the hub assign a different one.
+      const effectiveId = hubServer?.isRunning
+        ? (hubServer?.sessionId ?? sessionId)
+        : (sessionManager?.effectiveSessionId ?? sessionId);
       const info = hubServer?.isRunning
-        ? `Running as Hub (session: "${sessionId}") on port ${port}`
-        : `Running as Satellite (session: "${sessionId}") connected to hub on port ${port}`;
+        ? `Running as Hub (session: "${effectiveId}") on port ${port}`
+        : `Running as Satellite (session: "${effectiveId}") connected to hub on port ${port}`;
 
       if (agentServer?.isRunning) {
         vscode.window.showInformationMessage(
@@ -160,23 +215,78 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     })
   );
 
-  context.subscriptions.push({
-    dispose: () => {
-      sessionManager?.dispose();
-      hubServer?.stop();
-      agentServer?.stop();
-      terminalManager?.dispose();
-    },
-  });
+  // Teardown lives in deactivate(), which VS Code awaits. A second, un-awaited copy here
+  // would race it: whichever ran first would null the server and turn the other into a no-op,
+  // with the shutdown still in flight.
 
   if (autoStart) {
     await startBridge(sessionId, bufferLines, hubPort);
   }
 }
 
+/**
+ * The id this window registers under.
+ *
+ * Sanitized here, once, so the hub's own entry and the value a satellite sends are identical.
+ * Doing it in two places meant a folder named `My  App` became `My App` when that window was
+ * hub and stayed `My  App` when it was a satellite — two keys for one window.
+ */
+function deriveSessionId(): string {
+  return sanitizeLabel(vscode.workspace.workspaceFolders?.[0]?.name ?? 'default');
+}
+
+/**
+ * Try to start this window as the hub on `hubPort`.
+ *
+ * Shared by all three "become hub" call sites (fresh start, promotion after losing a hub, and
+ * recovery of an orphaned window) so the HubServer construction, the status bar update and the
+ * hubServer/undefined bookkeeping on failure live in exactly one place. Each caller still owns
+ * its own user-facing messaging, since that differs (a toast with a button, a warning that
+ * includes the error, a plain "promoted" notice).
+ */
+async function tryBecomeHub(
+  sessionId: string,
+  hubPort: number,
+): Promise<{ ok: true } | { ok: false; error: unknown }> {
+  if (!agentServer) return { ok: false, error: new Error('agent server not running') };
+  hubServer = new HubServer(agentServer, sessionId, hubPort);
+  try {
+    await hubServer.start();
+    updateStatusBar('hub', sessionId, hubPort);
+    return { ok: true };
+  } catch (error) {
+    // Leave no half-started hub behind: the instance never listened, but its constructor
+    // already subscribed to ownAgent.events (unconditionally, unlike the sweepTimer) — without
+    // stop(), that subscription would outlive this discarded instance and keep re-emitting into
+    // an event bus nobody reads.
+    await hubServer.stop();
+    hubServer = undefined;
+    return { ok: false, error };
+  }
+}
+
 async function startBridge(sessionId: string, bufferLines: number, hubPort: number): Promise<void> {
-  if (agentServer?.isRunning) {
+  // A window whose agent server is up but which belongs to no hub is exactly the state a
+  // failed promotion leaves behind. Refusing to act on it made the command useless for the
+  // one situation where the user most needs it, so recover instead of reporting success.
+  if (agentServer?.isRunning && (hubServer?.isRunning || sessionManager)) {
     vscode.window.showWarningMessage('Pylon is already running.');
+    return;
+  }
+  if (agentServer?.isRunning) {
+    sessionManager?.dispose();
+    sessionManager = undefined;
+    const agentUrl = `http://127.0.0.1:${agentServer.port}`;
+    const hubExists = await SessionManager.discoverHub(hubPort);
+    if (hubExists) { await registerAsSatellite(sessionId, agentUrl, hubPort); return; }
+    // Another window just took the port — that is the ordinary outcome of a race, not a
+    // failure. Join it instead of leaving this window orphaned again.
+    const result = await tryBecomeHub(sessionId, hubPort);
+    if (result.ok) {
+      vscode.window.showInformationMessage(`Pylon: Hub started (session: "${sessionId}")`);
+    } else {
+      await registerAsSatellite(sessionId, agentUrl, hubPort);
+    }
     return;
   }
 
@@ -188,7 +298,9 @@ async function startBridge(sessionId: string, bufferLines: number, hubPort: numb
   }
 
   try {
-    await agentServer.start(27691);
+    // Derived from the hub port so moving one moves the other; they were independent
+    // before, which made pylon.port only half-configurable.
+    await agentServer.start(hubPort + 10);
   } catch (e) {
     vscode.window.showErrorMessage(`Pylon: failed to start agent server: ${e}`);
     return;
@@ -198,11 +310,8 @@ async function startBridge(sessionId: string, bufferLines: number, hubPort: numb
   const hubExists = await SessionManager.discoverHub(hubPort);
 
   if (!hubExists) {
-    // Become the hub
-    hubServer = new HubServer(agentServer, sessionId, hubPort);
-    try {
-      await hubServer.start();
-      updateStatusBar('hub', sessionId, hubPort);
+    const result = await tryBecomeHub(sessionId, hubPort);
+    if (result.ok) {
       vscode.window.showInformationMessage(
         `Pylon: Hub started (session: "${sessionId}") on port ${hubPort}`,
         'Copy MCP Config'
@@ -212,9 +321,9 @@ async function startBridge(sessionId: string, bufferLines: number, hubPort: numb
           vscode.window.showInformationMessage('MCP config copied to clipboard!');
         }
       });
-    } catch (e) {
+    } else {
       // Race condition — another window just became hub
-      vscode.window.showWarningMessage(`Pylon: could not become hub (${e}), registering as satellite.`);
+      vscode.window.showWarningMessage(`Pylon: could not become hub (${result.error}), registering as satellite.`);
       await registerAsSatellite(sessionId, agentUrl, hubPort);
     }
   } else {
@@ -223,54 +332,84 @@ async function startBridge(sessionId: string, bufferLines: number, hubPort: numb
 }
 
 async function registerAsSatellite(sessionId: string, agentUrl: string, hubPort: number): Promise<void> {
-  sessionManager = new SessionManager(sessionId, agentUrl, async () => {
-    // Hub lost — attempt to promote
+  // Declared before assignment and captured by identity in the callback below: onHubLost is
+  // async and can still be mid-flight (its own retry loop runs for up to ~25s) after something
+  // else — a manual stop, a fresh registerAsSatellite call — has replaced the module-level
+  // `sessionManager` with a newer instance. Reading `sessionManager` by name at that point would
+  // silently act on that newer instance instead of being a no-op for this dead one.
+  const mine: SessionManager = new SessionManager(sessionId, agentUrl, async () => {
+    // Hub lost — attempt to promote. Read back the id this window actually registered under:
+    // the hub may have assigned a different one on a name collision, and promoting under the
+    // originally-requested id would hand the new hub's registry a name no satellite recognizes.
     if (!agentServer || !terminalManager) return;
-    hubServer = new HubServer(agentServer, sessionId, hubPort);
-    try {
-      await hubServer.start();
-      updateStatusBar('hub', sessionId, hubPort);
+    if (sessionManager !== mine) return;
+    const effectiveId = mine.effectiveSessionId;
+    const result = await tryBecomeHub(effectiveId, hubPort);
+    if (sessionManager !== mine) return;
+    if (result.ok) {
       vscode.window.showInformationMessage(
-        `Pylon: Promoted to Hub (session: "${sessionId}") on port ${hubPort}`
+        `Pylon: Promoted to Hub (session: "${effectiveId}") on port ${hubPort}`
       );
-    } catch {
-      // Another satellite already promoted — re-register with new hub
+    } else {
+      // Another satellite won the race for the port — re-register with whoever holds it.
       const retryDelay = (ms: number) => new Promise((r) => setTimeout(r, ms));
-      for (let i = 0; i < 5; i++) {
-        await retryDelay(500);
-        if (await SessionManager.discoverHub(hubPort)) {
-          try {
-            await sessionManager!.registerWithHub(hubPort);
-            sessionManager!.startHeartbeat(hubPort);
-            updateStatusBar('satellite', sessionId, hubPort);
-          } catch {
-            // ignore — will retry on next iteration
-          }
+      // Exponential backoff over ~25s instead of five fixed 500ms tries. The old loop also
+      // returned from inside the catch, so a failed registration was never retried despite a
+      // comment promising it was — that window stayed orphaned with a green status bar.
+      for (let attempt = 0; attempt < 8; attempt++) {
+        await retryDelay(Math.min(500 * 2 ** attempt, 8000));
+        if (sessionManager !== mine) return;
+        if (!(await SessionManager.discoverHub(hubPort))) continue;
+        try {
+          await mine.registerWithHub(hubPort);
+          if (sessionManager !== mine) return;
+          mine.startHeartbeat(hubPort);
+          updateStatusBar('satellite', mine.effectiveSessionId, hubPort);
           return;
+        } catch {
+          // Genuinely retried now: the hub may still be finishing its own startup.
         }
       }
-      vscode.window.showWarningMessage('Pylon: could not reconnect to hub after promotion race.');
+      if (sessionManager !== mine) return;
+      // Cleared so the recovery path in startBridge is actually reachable: while this is set,
+      // the "already running" guard turns the command the message recommends into a no-op.
+      mine.dispose();
+      sessionManager = undefined;
+      updateStatusBar('stopped', '');
+      vscode.window.showWarningMessage(
+        'Pylon: could not reconnect to a hub. Run "Pylon: Start MCP Server" to retry.'
+      );
     }
   });
+  sessionManager = mine;
 
   try {
-    await sessionManager.registerWithHub(hubPort);
-    sessionManager.startHeartbeat(hubPort);
-    updateStatusBar('satellite', sessionId, hubPort);
+    await mine.registerWithHub(hubPort);
+    mine.startHeartbeat(hubPort);
+    const effectiveId = mine.effectiveSessionId;
+    updateStatusBar('satellite', effectiveId, hubPort);
     vscode.window.showInformationMessage(
-      `Pylon: Connected as satellite (session: "${sessionId}")`
+      `Pylon: Connected as satellite (session: "${effectiveId}")`
     );
   } catch (e) {
+    // Same reason as above — leaving a SessionManager behind that never heartbeats would
+    // block the manual retry without ever triggering failover on its own.
+    mine.dispose();
+    if (sessionManager === mine) sessionManager = undefined;
+    updateStatusBar('stopped', '');
     vscode.window.showErrorMessage(`Pylon: failed to register with hub: ${e}`);
   }
 }
 
 async function stopBridge(): Promise<void> {
+  await sessionManager?.unregister(activeHubPort);
   sessionManager?.dispose();
   sessionManager = undefined;
-  await hubServer?.stop();
+  // The two servers share no state during teardown, so stopping them in parallel halves the
+  // wait instead of paying each one's shutdown grace period back to back.
+  await Promise.all([hubServer?.stop(), agentServer?.stop()]);
   hubServer = undefined;
-  await agentServer?.stop();
+  agentServer = undefined;
   updateStatusBar('stopped', '');
   vscode.window.showInformationMessage('Pylon stopped.');
 }
@@ -302,9 +441,14 @@ function buildMCPConfig(port: number): object {
   };
 }
 
-export function deactivate(): void {
+export async function deactivate(): Promise<void> {
+  // Closing a window is how a satellite usually disappears — far more common than the manual
+  // Stop command — so this is the path that most needs to say goodbye.
+  await sessionManager?.unregister(activeHubPort);
   sessionManager?.dispose();
-  hubServer?.stop();
-  agentServer?.stop();
+  // Awaited, not fired and forgotten: VS Code gives deactivate a chance to finish, and the
+  // servers now hold sockets that must be released before the ports are free again. Run in
+  // parallel — the two share no teardown state — so a slow one doesn't double the wait.
+  await Promise.all([hubServer?.stop(), agentServer?.stop()]);
   terminalManager?.dispose();
 }

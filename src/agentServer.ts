@@ -1,6 +1,8 @@
 import * as http from 'http';
 import * as vscode from 'vscode';
 import { TerminalManager, CommandResult } from './terminalManager';
+import { applyRequestGuards, ConnectionTracker, guardedSseWrite, sseWrite, startKeepAlive, SSE_HEADERS } from './http';
+import { EventBus } from './events';
 
 export interface ToolResult {
     content: Array<{ type: string; text: string }>;
@@ -10,12 +12,28 @@ export class AgentServer {
     private server: http.Server | null = null;
     private terminalManager: TerminalManager;
     private debugOutputBuffer: string[] = [];
+    private connections = new ConnectionTracker();
+    readonly events = new EventBus();
+    /**
+     * Why each debug session last stopped, straight from the DAP `stopped` event.
+     *
+     * Keyed by session id rather than held as one shared scalar: with more than one active
+     * debug session, a single field would have the second session's `stopped` event overwrite
+     * the reason `debug_state` reports for the first.
+     *
+     * Held here rather than imported from extension.ts: that would be a cycle
+     * (extension -> agentServer -> extension), and under CommonJS the value would read as
+     * undefined at load time.
+     */
+    private stoppedReasons = new Map<string, string>();
     private maxDebugOutputLines: number;
     port = 0;
 
     constructor(terminalManager: TerminalManager, maxDebugOutputLines = 2000) {
         this.terminalManager = terminalManager;
         this.maxDebugOutputLines = maxDebugOutputLines;
+        // Terminal lifecycle reaches subscribers through the same bus as everything else.
+        this.terminalManager.events = this.events;
     }
 
     start(basePort = 27691): Promise<number> {
@@ -29,11 +47,32 @@ export class AgentServer {
             const candidatePort = basePort + attempt;
             return new Promise((resolve, reject) => {
                 const server = http.createServer((req, res) => {
-                    res.setHeader('Access-Control-Allow-Origin', '*');
-                    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-                    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+                    // Same reason as in hubServer: this handler answers long after the request
+                    // arrived, and an unhandled 'error' on a ServerResponse whose peer has gone
+                    // takes down the extension host.
+                    res.on('error', () => {});
 
-                    if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+                    // No CORS headers — see the matching comment in hubServer.ts. The agent
+                    // server is just as reachable from a browser as the hub is.
+                    if (applyRequestGuards(req, res)) return;
+
+                    // The reverse channel: the hub opens this and keeps it open, so this
+                    // window can push events instead of only answering when asked.
+                    if (req.method === 'GET' && req.url === '/events') {
+                        res.writeHead(200, { ...SSE_HEADERS });
+                        res.flushHeaders();
+                        this.connections.addStream(res);
+                        const stopKeepAlive = startKeepAlive(res);
+                        // Same drop-don't-buffer rule as the tool stream: res.write() queues
+                        // in memory when it returns false, so without this a stalled reader
+                        // grows the heap for the life of the connection.
+                        const write = guardedSseWrite(res);
+                        const unsubscribe = this.events.subscribe((event) => {
+                            write({ t: 'event', ...event });
+                        });
+                        res.on('close', () => { unsubscribe(); stopKeepAlive(); });
+                        return;
+                    }
 
                     if (req.method === 'GET' && req.url === '/health') {
                         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -42,11 +81,14 @@ export class AgentServer {
                     }
 
                     if (req.method === 'POST' && req.url === '/tool') {
+                        // See the matching note in HubServer.parseBody: without setEncoding a
+                        // multi-byte character split across a socket read is silently corrupted.
+                        req.setEncoding('utf8');
                         let body = '';
                         let bodySize = 0;
                         const MAX_BODY = 1024 * 1024; // 1 MB
-                        req.on('data', (chunk) => {
-                            bodySize += chunk.length;
+                        req.on('data', (chunk: string) => {
+                            bodySize += Buffer.byteLength(chunk, 'utf8');
                             if (bodySize <= MAX_BODY) { body += chunk; }
                         });
                         req.on('end', async () => {
@@ -55,17 +97,70 @@ export class AgentServer {
                                 res.end(JSON.stringify({ error: 'Request body too large' }));
                                 return;
                             }
+
+                            // Parse BEFORE deciding how to answer: a malformed body must still
+                            // produce a 400 with headers unsent. Committing SSE headers first
+                            // would make that impossible.
+                            let tool: string;
+                            let params: Record<string, unknown>;
                             try {
-                                const { tool, params } = JSON.parse(body) as {
+                                ({ tool, params } = JSON.parse(body) as {
                                     tool: string;
                                     params: Record<string, unknown>;
-                                };
-                                const result = await this.callTool(tool, params);
-                                res.writeHead(200, { 'Content-Type': 'application/json' });
-                                res.end(JSON.stringify(result));
+                                });
                             } catch (e) {
                                 res.writeHead(400, { 'Content-Type': 'application/json' });
                                 res.end(JSON.stringify({ error: String(e) }));
+                                return;
+                            }
+
+                            // The hub asks for a stream only when it has somewhere to forward
+                            // progress to. A Pylon that predates this just ignores the header
+                            // and answers buffered JSON — which is a normal situation, since
+                            // each window is its own extension host and only the reloaded one
+                            // runs the new code.
+                            const wantsStream = (req.headers.accept ?? '').includes('text/event-stream');
+
+                            if (!wantsStream) {
+                                try {
+                                    const result = await this.callTool(tool, params);
+                                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                                    res.end(JSON.stringify(result));
+                                } catch (e) {
+                                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                                    res.end(JSON.stringify({ error: String(e) }));
+                                }
+                                return;
+                            }
+
+                            // Streaming: same SSE framing the hub uses toward MCP clients, so
+                            // the hub stays a thin relay. Exactly one terminal frame, then end.
+                            res.writeHead(200, { ...SSE_HEADERS });
+                            res.flushHeaders();
+                            this.connections.addStream(res);
+                            const stopKeepAlive = startKeepAlive(res);
+                            let aborted = false;
+                            res.on('close', () => { aborted = true; });
+
+                            const write = guardedSseWrite(res);
+                            const onProgress = (chunk: string) => {
+                                if (aborted) return;
+                                write({ t: 'progress', chunk });
+                            };
+
+                            try {
+                                const result = await this.callTool(tool, params, onProgress);
+                                // Never routed through the guard: progress is advisory and may
+                                // be dropped under backpressure, but the terminal frame is the
+                                // only thing telling the hub how this call ended and must not be.
+                                if (!aborted) sseWrite(res, { t: 'result', result });
+                            } catch (e) {
+                                // Headers are already committed, so an error cannot be a status
+                                // code any more — it travels as the stream's terminal frame.
+                                if (!aborted) sseWrite(res, { t: 'error', error: { message: String(e) } });
+                            } finally {
+                                stopKeepAlive();
+                                if (!aborted) res.end();
                             }
                         });
                         return;
@@ -84,6 +179,7 @@ export class AgentServer {
                     }
                 });
 
+                this.connections.attach(server);
                 server.listen(candidatePort, '127.0.0.1', () => {
                     this.server = server;
                     this.port = candidatePort;
@@ -94,11 +190,13 @@ export class AgentServer {
         return tryPort(0);
     }
 
-    stop(): Promise<void> {
-        return new Promise((resolve) => {
-            if (!this.server) { resolve(); return; }
-            this.server.close(() => { this.server = null; resolve(); });
-        });
+    async stop(): Promise<void> {
+        const server = this.server;
+        if (!server) return;
+        // Cleared before awaiting so isRunning cannot claim a server that is on its way out,
+        // and a restart cannot race a port this one still holds.
+        this.server = null;
+        await this.connections.shutdown(server);
     }
 
     get isRunning(): boolean {
@@ -126,6 +224,18 @@ export class AgentServer {
 
     clearDebugOutput(): void {
         this.debugOutputBuffer = [];
+    }
+
+    setStoppedReason(sessionId: string, reason: string | null): void {
+        if (reason === null) {
+            this.stoppedReasons.delete(sessionId);
+        } else {
+            this.stoppedReasons.set(sessionId, reason);
+        }
+    }
+
+    getStoppedReason(sessionId: string): string | undefined {
+        return this.stoppedReasons.get(sessionId);
     }
 
     private async expandVariables(
@@ -165,6 +275,17 @@ export class AgentServer {
         onProgress?: (chunk: string) => void,
     ): Promise<ToolResult> {
         const text = (s: string): ToolResult => ({ content: [{ type: 'text', text: s }] });
+
+        // Defense in depth: the hub already checks its own pylon.disabledTools before routing
+        // here, but that only ever reads the hub window's setting. A satellite with a
+        // different (e.g. workspace-scoped) pylon.disabledTools value had no enforcement point
+        // of its own — this call could still reach it. Enforce this window's own setting
+        // locally in addition to the hub's check, so it does not depend on which window
+        // happens to be hub.
+        const disabledHere = vscode.workspace.getConfiguration('pylon').get<string[]>('disabledTools', []);
+        if (disabledHere.includes(name)) {
+            throw new Error(`Tool "${name}" is disabled in this window's Pylon settings.`);
+        }
 
         switch (name) {
             case 'terminal_list': {
@@ -738,7 +859,10 @@ export class AgentServer {
                         line: number;
                         column: number;
                     }> = [];
-                    let stoppedReason = '';
+                    // From the DAP `stopped` event the tracker now keeps. Without it this
+                    // could only ever say 'running' (set in the catch below), so a breakpoint
+                    // hit, an exception and a completed step all rendered identically.
+                    let stoppedReason = this.getStoppedReason(session.id) ?? '';
                     try {
                         const stResp = await session.customRequest('stackTrace', {
                             threadId: thread.id,
